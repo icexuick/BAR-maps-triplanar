@@ -1,0 +1,3973 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Triplanar Terrain</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;500&family=Outfit:wght@300;600;800&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0a0a0f;
+    color: #e0e0e8;
+    font-family: 'Outfit', sans-serif;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+
+  #canvas-container {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+  }
+
+  canvas { display: block; width: 100%; height: 100%; }
+
+  .hud {
+    position: fixed;
+    z-index: 10;
+    pointer-events: none;
+  }
+
+  .hud-top-left {
+    top: 24px; left: 28px;
+  }
+
+  .hud-top-left h1 {
+    font-family: 'Outfit', sans-serif;
+    font-weight: 800;
+    font-size: 22px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #fff;
+    text-shadow: 0 0 30px rgba(100, 200, 255, 0.3);
+  }
+
+  .hud-top-left .subtitle {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 300;
+    color: rgba(160, 200, 240, 0.6);
+    margin-top: 4px;
+    letter-spacing: 0.15em;
+  }
+
+  .hud-bottom-left {
+    /* Anchored directly under the stats panel (top:90 + min-height ~280 +
+       gap) and stretched down to the bottom — controls scroll inside. */
+    top: 388px;
+    bottom: 28px;
+    left: 28px;
+    width: 320px;
+    pointer-events: all;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 14px 16px;
+    background: rgba(10, 18, 32, 0.6);
+    border: 1px solid rgba(100, 180, 255, 0.12);
+    border-radius: 5px;
+    backdrop-filter: blur(8px);
+    box-sizing: border-box;
+  }
+  .hud-bottom-left::-webkit-scrollbar { width: 4px; }
+  .hud-bottom-left::-webkit-scrollbar-track { background: transparent; }
+  .hud-bottom-left::-webkit-scrollbar-thumb { background: rgba(100, 180, 255, 0.2); border-radius: 2px; }
+
+  .controls {
+    pointer-events: all;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .panel-title {
+    font-family: 'Outfit', sans-serif;
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: rgba(200, 230, 255, 0.8);
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(100, 180, 255, 0.15);
+  }
+
+  .control-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .control-row label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(160, 200, 240, 0.65);
+    min-width: 90px;
+  }
+
+  .control-row .val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: rgba(180, 220, 255, 0.85);
+    min-width: 42px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 120px;
+    height: 3px;
+    background: rgba(100, 180, 255, 0.15);
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: rgba(100, 200, 255, 0.7);
+    border: 2px solid rgba(255,255,255,0.3);
+    box-shadow: 0 0 12px rgba(100, 200, 255, 0.4);
+    cursor: grab;
+  }
+
+  .preset-btns {
+    display: flex;
+    gap: 8px;
+    margin-top: 6px;
+  }
+
+  .preset-btn {
+    pointer-events: all;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 6px 14px;
+    border: 1px solid rgba(100, 180, 255, 0.2);
+    background: rgba(10, 15, 30, 0.7);
+    color: rgba(160, 200, 240, 0.7);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    backdrop-filter: blur(8px);
+  }
+
+  .preset-btn:hover {
+    border-color: rgba(100, 200, 255, 0.5);
+    color: #fff;
+    background: rgba(30, 60, 100, 0.4);
+    box-shadow: 0 0 20px rgba(100, 200, 255, 0.15);
+  }
+
+  .preset-btn.active {
+    border-color: rgba(100, 200, 255, 0.6);
+    color: #fff;
+    background: rgba(40, 80, 140, 0.35);
+  }
+
+  .hud-bottom-right {
+    bottom: 28px; right: 28px;
+  }
+
+  /* Stats panel lives top-left under the title, in its own boxed container
+     so it doesn't collide with the layer panel on the right or the controls
+     panel at the bottom. */
+  .hud-stats {
+    top: 90px; left: 28px;
+    width: 320px;
+    min-height: 240px;
+    padding: 14px 16px;
+    background: rgba(10, 18, 32, 0.6);
+    border: 1px solid rgba(100, 180, 255, 0.12);
+    border-radius: 5px;
+    backdrop-filter: blur(8px);
+    pointer-events: all;
+    box-sizing: border-box;
+  }
+
+  .stats {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: rgba(160, 200, 240, 0.55);
+    text-align: left;
+    line-height: 1.7;
+  }
+
+  .group-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: rgba(100, 200, 255, 0.5);
+    margin-top: 14px;
+    margin-bottom: 2px;
+    padding-bottom: 3px;
+    border-bottom: 1px solid rgba(100, 180, 255, 0.08);
+  }
+  .group-title:first-child { margin-top: 0; }
+
+  /* Layer panel (right side) */
+  .hud-right {
+    top: 24px; right: 28px;
+    bottom: 90px;
+    width: 340px;
+    pointer-events: all;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 4px;
+  }
+  .hud-right::-webkit-scrollbar { width: 4px; }
+  .hud-right::-webkit-scrollbar-track { background: transparent; }
+  .hud-right::-webkit-scrollbar-thumb { background: rgba(100, 180, 255, 0.2); border-radius: 2px; }
+
+  .layer-panel-title {
+    font-family: 'Outfit', sans-serif;
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: rgba(200, 230, 255, 0.8);
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(100, 180, 255, 0.15);
+  }
+
+  .layer-card {
+    background: rgba(10, 18, 32, 0.6);
+    border: 1px solid rgba(100, 180, 255, 0.12);
+    border-radius: 5px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    backdrop-filter: blur(8px);
+  }
+  .layer-card.base { border-color: rgba(255, 200, 100, 0.25); }
+
+  .layer-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .layer-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: rgba(100, 180, 255, 0.15);
+    color: rgba(180, 220, 255, 0.9);
+  }
+  .layer-card.base .layer-tag {
+    background: rgba(255, 200, 100, 0.15);
+    color: rgba(255, 220, 160, 0.9);
+  }
+  .layer-del {
+    background: transparent;
+    border: none;
+    color: rgba(255, 120, 120, 0.5);
+    font-size: 14px;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+  }
+  .layer-del:hover { color: rgba(255, 120, 120, 1); }
+
+  .layer-vis {
+    background: transparent;
+    border: 1px solid rgba(100, 180, 255, 0.25);
+    border-radius: 3px;
+    color: rgba(180, 220, 255, 0.85);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    cursor: pointer;
+    margin-right: 6px;
+  }
+  .layer-vis:hover { border-color: rgba(100, 200, 255, 0.55); color: #fff; }
+  .layer-vis.off {
+    color: rgba(160, 200, 240, 0.35);
+    border-color: rgba(100, 180, 255, 0.12);
+    background: rgba(10, 20, 35, 0.5);
+  }
+  .layer-card.hidden-layer { opacity: 0.55; }
+  .layer-card.hidden-layer .layer-tag { opacity: 0.5; }
+
+  .layer-card select {
+    width: 100%;
+    padding: 5px 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    background: rgba(10, 20, 35, 0.8);
+    color: rgba(200, 230, 255, 0.9);
+    border: 1px solid rgba(100, 180, 255, 0.2);
+    border-radius: 3px;
+    outline: none;
+    margin-bottom: 8px;
+    cursor: pointer;
+  }
+  .layer-card select:focus { border-color: rgba(100, 200, 255, 0.5); }
+
+  .layer-slider {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .layer-slider label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(160, 200, 240, 0.55);
+    min-width: 70px;
+  }
+  .layer-slider input[type="range"] {
+    flex: 1;
+    width: auto;
+  }
+  .layer-slider .val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: rgba(160, 200, 240, 0.6);
+    min-width: 32px;
+    text-align: right;
+  }
+
+  .add-layer-btn {
+    width: 100%;
+    margin-top: 6px;
+    padding: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    background: rgba(10, 20, 35, 0.6);
+    color: rgba(160, 200, 240, 0.7);
+    border: 1px dashed rgba(100, 180, 255, 0.25);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+  .add-layer-btn:hover {
+    background: rgba(30, 60, 100, 0.3);
+    border-color: rgba(100, 200, 255, 0.5);
+    color: #fff;
+  }
+
+  /* Height-gradient editor inside each auto-layer card */
+  .gradient-editor {
+    margin-top: 8px;
+    padding: 8px;
+    background: rgba(5, 15, 25, 0.5);
+    border: 1px solid rgba(100, 180, 255, 0.12);
+    border-radius: 4px;
+  }
+  .gradient-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+  .gradient-head label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(160, 200, 240, 0.55);
+    flex: 1;
+  }
+  .gradient-head input[type="checkbox"] {
+    accent-color: rgba(100, 200, 255, 0.8);
+  }
+  .gradient-bar {
+    position: relative;
+    height: 14px;
+    border-radius: 3px;
+    border: 1px solid rgba(100, 180, 255, 0.2);
+    margin-bottom: 6px;
+    background: #000;
+  }
+  .gradient-stop-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 3px;
+  }
+  .gradient-stop-row input[type="color"] {
+    width: 22px;
+    height: 18px;
+    border: 1px solid rgba(100, 180, 255, 0.2);
+    border-radius: 2px;
+    background: transparent;
+    padding: 0;
+    cursor: pointer;
+  }
+  .gradient-stop-row input[type="range"] {
+    flex: 1;
+    width: auto;
+  }
+  .gradient-stop-row .val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: rgba(160, 200, 240, 0.6);
+    min-width: 28px;
+    text-align: right;
+  }
+  .gradient-stop-row .stop-del {
+    width: 18px;
+    height: 18px;
+    line-height: 16px;
+    text-align: center;
+    background: transparent;
+    color: rgba(200, 120, 120, 0.7);
+    border: 1px solid rgba(200, 120, 120, 0.25);
+    border-radius: 2px;
+    font-size: 10px;
+    cursor: pointer;
+    padding: 0;
+  }
+  .gradient-stop-row .stop-del:hover {
+    background: rgba(200, 120, 120, 0.2);
+    color: #fff;
+  }
+  .gradient-add-stop {
+    width: 100%;
+    margin-top: 4px;
+    padding: 4px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    background: rgba(10, 20, 35, 0.6);
+    color: rgba(160, 200, 240, 0.7);
+    border: 1px dashed rgba(100, 180, 255, 0.2);
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .gradient-add-stop:hover:not(:disabled) {
+    background: rgba(30, 60, 100, 0.3);
+    border-color: rgba(100, 200, 255, 0.4);
+    color: #fff;
+  }
+  .gradient-add-stop:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+
+  /* Edge-noise: which of the 4 band edges the noise applies to */
+  .edge-mask-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 8px;
+    margin-bottom: 6px;
+  }
+  .edge-mask-row label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: rgba(160, 200, 240, 0.6);
+    cursor: pointer;
+  }
+  .edge-mask-row input[type="checkbox"] {
+    accent-color: rgba(100, 200, 255, 0.8);
+  }
+
+  /* Materials panel (sits left of the Layers panel) */
+  .hud-materials {
+    top: 24px; right: 380px;
+    bottom: 90px;
+    width: 320px;
+    pointer-events: all;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 4px;
+    display: none;
+  }
+  .hud-materials.open { display: block; }
+  .hud-materials::-webkit-scrollbar { width: 4px; }
+  .hud-materials::-webkit-scrollbar-track { background: transparent; }
+  .hud-materials::-webkit-scrollbar-thumb { background: rgba(100, 180, 255, 0.2); border-radius: 2px; }
+
+  .mat-card {
+    background: rgba(10, 18, 32, 0.6);
+    border: 1px solid rgba(100, 180, 255, 0.12);
+    border-radius: 5px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    backdrop-filter: blur(8px);
+  }
+  .mat-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .mat-preview {
+    width: 44px; height: 44px;
+    border-radius: 4px;
+    border: 1px solid rgba(100, 180, 255, 0.2);
+    background-size: cover;
+    background-position: center;
+    flex-shrink: 0;
+  }
+  .mat-title {
+    flex: 1;
+    font-family: 'Outfit', sans-serif;
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: rgba(200, 230, 255, 0.85);
+  }
+  .mat-card .mat-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    color: rgba(160, 200, 240, 0.5);
+    margin-top: 2px;
+  }
+  .mat-card input[type="color"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 32px; height: 18px;
+    border: 1px solid rgba(100, 180, 255, 0.2);
+    border-radius: 3px;
+    padding: 0;
+    background: transparent;
+    cursor: pointer;
+  }
+  .mat-card input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+  .mat-card input[type="color"]::-webkit-color-swatch { border: none; border-radius: 2px; }
+
+  .mat-toggle-btn {
+    position: fixed;
+    top: 24px; right: 380px;
+    pointer-events: all;
+    z-index: 11;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 6px 12px;
+    border: 1px solid rgba(100, 180, 255, 0.2);
+    background: rgba(10, 15, 30, 0.7);
+    color: rgba(160, 200, 240, 0.7);
+    border-radius: 4px;
+    cursor: pointer;
+    backdrop-filter: blur(8px);
+  }
+  .mat-toggle-btn:hover {
+    border-color: rgba(100, 200, 255, 0.5);
+    color: #fff;
+  }
+  .mat-toggle-btn.active {
+    border-color: rgba(100, 200, 255, 0.6);
+    color: #fff;
+    background: rgba(40, 80, 140, 0.35);
+  }
+
+  .corner-deco {
+    position: fixed;
+    width: 40px; height: 40px;
+    border-color: rgba(100, 180, 255, 0.12);
+    border-style: solid;
+    z-index: 5;
+  }
+  .corner-tl { top: 12px; left: 12px; border-width: 1px 0 0 1px; }
+  .corner-tr { top: 12px; right: 12px; border-width: 1px 1px 0 0; }
+  .corner-bl { bottom: 12px; left: 12px; border-width: 0 0 1px 1px; }
+  .corner-br { bottom: 12px; right: 12px; border-width: 0 1px 1px 0; }
+
+  .scanline {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(100, 180, 255, 0.008) 2px,
+      rgba(100, 180, 255, 0.008) 4px
+    );
+    pointer-events: none;
+    z-index: 20;
+  }
+</style>
+</head>
+<body>
+
+<div class="scanline"></div>
+<div class="corner-deco corner-tl"></div>
+<div class="corner-deco corner-tr"></div>
+<div class="corner-deco corner-bl"></div>
+<div class="corner-deco corner-br"></div>
+
+<div id="canvas-container"></div>
+
+<div class="hud hud-top-left">
+  <h1>Triplanar Terrain</h1>
+  <div class="subtitle">three.js &middot; glsl shader &middot; layered materials</div>
+</div>
+
+<div class="hud hud-bottom-left">
+  <div class="panel-title">Controls</div>
+  <div class="controls">
+    <div class="group-title">Shader</div>
+    <div class="control-row">
+      <label>Texture Scale</label>
+      <input type="range" id="texScale" min="0.5" max="8" step="0.1" value="2.5">
+    </div>
+    <div class="control-row">
+      <label>Blend Sharp</label>
+      <input type="range" id="blendSharp" min="0.5" max="8" step="0.1" value="2">
+    </div>
+    <div class="control-row">
+      <label>Fog</label>
+      <input type="range" id="fogDensity" min="0" max="0.03" step="0.0005" value="0.004">
+    </div>
+
+    <div class="group-title">Lighting</div>
+    <div class="control-row">
+      <label>Ambient</label>
+      <input type="range" id="ambientStrength" min="0" max="1" step="0.01" value="0.35">
+    </div>
+    <div class="control-row">
+      <label>Sun</label>
+      <input type="range" id="sunStrength" min="0" max="2" step="0.01" value="1.15">
+    </div>
+    <div class="control-row">
+      <label>Rim</label>
+      <input type="range" id="rimStrength" min="0" max="1" step="0.01" value="0">
+    </div>
+    <div class="control-row">
+      <label>Specular</label>
+      <input type="range" id="specular" min="0" max="1" step="0.01" value="0.12">
+    </div>
+    <div class="control-row">
+      <label>Sun X</label>
+      <input type="range" id="sunX" min="-1" max="1" step="0.01" value="0.6">
+    </div>
+    <div class="control-row">
+      <label>Sun Y</label>
+      <input type="range" id="sunY" min="0.1" max="1" step="0.01" value="0.8">
+    </div>
+    <div class="control-row">
+      <label>Sun Z</label>
+      <input type="range" id="sunZ" min="-1" max="1" step="0.01" value="0.3">
+    </div>
+    <div class="control-row">
+      <label>Shadow Bias</label>
+      <input type="range" id="shadowBias" min="0" max="0.001" step="0.00001" value="0.00005">
+    </div>
+    <div class="control-row">
+      <label>Shadow N-Bias</label>
+      <input type="range" id="shadowNormalBias" min="0" max="0.3" step="0.001" value="0.04">
+    </div>
+    <div class="control-row">
+      <label>Shadow Soft</label>
+      <input type="range" id="shadowSoftness" min="0.5" max="8" step="0.1" value="2.5">
+    </div>
+    <div class="control-row">
+      <label>Shadows</label>
+      <input type="range" id="shadowEnabled" min="0" max="1" step="1" value="1">
+    </div>
+
+    <div class="group-title">Heightmap</div>
+    <div class="control-row">
+      <label>Proc Height</label>
+      <input type="range" id="displacement" min="0" max="6" step="0.1" value="2.8">
+    </div>
+    <div class="control-row">
+      <label>Height Scale</label>
+      <input type="range" id="heightScale" min="0" max="20" step="0.1" value="4.0">
+    </div>
+    <div class="control-row">
+      <label>World Size</label>
+      <input type="range" id="worldSize" min="6" max="40" step="0.5" value="18">
+    </div>
+    <div class="preset-btns">
+      <button class="preset-btn" id="btn-load-heightmap">Load Heightmap</button>
+      <button class="preset-btn" id="btn-clear-heightmap">Procedural</button>
+    </div>
+
+    <div class="group-title">Topo Lines</div>
+    <div class="control-row">
+      <label>Enabled</label>
+      <input type="range" id="topoEnabled" min="0" max="1" step="1" value="0">
+    </div>
+    <div class="control-row">
+      <label>Spacing</label>
+      <input type="range" id="topoSpacing" min="0.05" max="3" step="0.01" value="0.6">
+    </div>
+    <div class="control-row">
+      <label>Width</label>
+      <input type="range" id="topoWidth" min="0.005" max="0.3" step="0.001" value="0.04">
+    </div>
+    <div class="control-row">
+      <label>Depth</label>
+      <input type="range" id="topoDepth" min="0" max="2" step="0.01" value="0.6">
+    </div>
+    <div class="control-row">
+      <label>Darken</label>
+      <input type="range" id="topoDarken" min="0" max="1" step="0.01" value="0.35">
+    </div>
+    <div class="control-row">
+      <label>Slope min</label>
+      <input type="range" id="topoSlopeMin" min="0" max="1" step="0.01" value="0">
+    </div>
+    <div class="control-row">
+      <label>Slope max</label>
+      <input type="range" id="topoSlopeMax" min="0" max="1" step="0.01" value="1">
+    </div>
+    <div class="control-row">
+      <label>Height min</label>
+      <input type="range" id="topoHeightMin" min="0" max="1" step="0.01" value="0">
+    </div>
+    <div class="control-row">
+      <label>Height max</label>
+      <input type="range" id="topoHeightMax" min="0" max="1" step="0.01" value="1">
+    </div>
+
+    <div class="group-title">Water</div>
+    <div class="control-row">
+      <label>Enabled</label>
+      <input type="range" id="waterEnabled" min="0" max="1" step="1" value="0">
+    </div>
+    <div class="control-row">
+      <label>Height</label>
+      <input type="range" id="waterHeight" min="0" max="5" step="0.01" value="0">
+    </div>
+    <div class="control-row">
+      <label>Distortion</label>
+      <input type="range" id="waterDistortion" min="0" max="10" step="0.05" value="3">
+    </div>
+    <div class="control-row">
+      <label>Size</label>
+      <input type="range" id="waterSize" min="1" max="20" step="0.1" value="3">
+    </div>
+    <div class="control-row">
+      <label>Alpha</label>
+      <input type="range" id="waterAlpha" min="0" max="1" step="0.01" value="0.6">
+    </div>
+    <div class="control-row">
+      <label>Flow Speed</label>
+      <input type="range" id="waterFlow" min="0" max="0.01" step="0.0001" value="0.002">
+    </div>
+    <div class="control-row">
+      <label>Color</label>
+      <input type="color" id="waterColor" value="#10424c" style="width: 120px; height: 18px; padding: 0; border: 1px solid rgba(100, 180, 255, 0.25); background: transparent; cursor: pointer;">
+    </div>
+    <div class="control-row">
+      <label>Sun Tint</label>
+      <input type="color" id="waterSunColor" value="#333333" style="width: 120px; height: 18px; padding: 0; border: 1px solid rgba(100, 180, 255, 0.25); background: transparent; cursor: pointer;">
+    </div>
+
+    <div class="preset-btns">
+      <button class="preset-btn" id="btn-load-skybox">Load Skybox</button>
+      <button class="preset-btn" id="btn-clear-skybox">No Skybox</button>
+    </div>
+    <input type="file" id="heightmapFile" accept="image/*" style="display:none">
+    <input type="file" id="skyboxFile" accept="image/*,.hdr" style="display:none">
+    <input type="file" id="configFile" accept="application/json,.json" style="display:none">
+  </div>
+</div>
+
+<button class="mat-toggle-btn" id="btn-toggle-materials">Materials</button>
+
+<div class="hud hud-materials" id="hud-materials">
+  <div class="layer-panel-title">Material Editor</div>
+  <div id="mat-list"></div>
+</div>
+
+<div class="hud hud-right" id="hud-right">
+  <div class="layer-panel-title">Material Layers</div>
+  <div id="layer-list"></div>
+  <button class="add-layer-btn" id="btn-add-layer">+ Add Auto Layer</button>
+</div>
+
+<div class="hud hud-stats">
+  <div class="stats">
+    <div id="stat-fps">FPS: --</div>
+    <div id="stat-frametime">FRAME: -- ms</div>
+    <div id="stat-tris">TRIS: --</div>
+    <div id="stat-drawcalls">DRAWS: --</div>
+    <div id="stat-shader">SHADER: TRIPLANAR</div>
+    <div id="stat-proj">PROJ: --</div>
+    <div id="stat-taps">TAPS/PX: --</div>
+    <div id="stat-texels">TEXELS/FR: --</div>
+    <div id="stat-alu">ALU OPS: --</div>
+    <div id="stat-varyings">VARY/UNI: --</div>
+    <div id="stat-pixels">PIXELS: --</div>
+    <div style="margin-top: 8px;">
+      <button id="btn-biplanar" style="
+        font-family: 'JetBrains Mono', monospace; font-size: 10px;
+        background: rgba(100, 180, 255, 0.08);
+        border: 1px solid rgba(100, 180, 255, 0.2);
+        color: rgba(160, 200, 240, 0.8);
+        padding: 4px 8px; border-radius: 3px; cursor: pointer;
+        width: 100%;">BIPLANAR: OFF</button>
+    </div>
+    <div class="preset-btns" style="margin-top: 8px;">
+      <button class="preset-btn" id="btn-save-config">Save Config</button>
+      <button class="preset-btn" id="btn-load-config">Load Config</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- THREE.Water from r128 examples (UMD build, exposes THREE.Water globally). -->
+<script src="https://unpkg.com/three@0.128.0/examples/js/objects/Water.js"></script>
+<!-- UPNG.js: decodes 8- and 16-bit PNGs to raw bytes, so we can feed real
+     16-bit heightmaps into a DataTexture without losing precision to the
+     browser's 8-bit canvas path. pako is a dependency for zlib inflate. -->
+<script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/upng-js@2.1.0/UPNG.js"></script>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════
+//  MATERIAL LIBRARY
+// ═══════════════════════════════════════════════════════════════════════
+// To add a new material:
+//   1. Drop a new ambientCG 1K-JPG set in ./textures/<id>/
+//   2. Add an entry below with its color/normal/rough file paths.
+//   3. Refresh the page. It shows up in every layer dropdown.
+//
+// Per-material tunables (all live-editable from the Materials panel):
+//   uvScale         texture repeat scale (larger = more tiling)
+//   uvRotation      radians, rotates UVs in all three triplanar axes
+//   brightness      multiplies albedo
+//   tint            vec3 rgb multiplier on albedo (1,1,1 = neutral)
+//   roughness       flat scalar 0..1 (0 = mirror, 1 = chalk); no texture lookup
+//   normalStrength  0 = flat, 1 = full normal map
+//   specular        per-material spec multiplier on top of global Specular
+const MATERIAL_LIBRARY = {
+  rock: {
+    label: 'Rock (red planet base)',
+    color:  'textures/rock/Rock030_1K-JPG_Color.jpg',
+    normal: 'textures/rock/Rock030_1K-JPG_NormalGL.jpg',
+    uvScale: 1.0, uvRotation: 0.0,
+    brightness: 1.0, tint: [1, 1, 1],
+    roughness: 0.85, normalStrength: 1.0, specular: 1.0
+  },
+  cliff: {
+    label: 'Cliff (sharp rock)',
+    color:  'textures/cliff/Rock048_1K-JPG_Color.jpg',
+    normal: 'textures/cliff/Rock048_1K-JPG_NormalGL.jpg',
+    uvScale: 1.1, uvRotation: 0.0,
+    brightness: 1.0, tint: [1, 1, 1],
+    roughness: 0.80, normalStrength: 1.0, specular: 1.0
+  },
+  grass: {
+    label: 'Grass',
+    color:  'textures/grass/Grass004_1K-JPG_Color.jpg',
+    normal: 'textures/grass/Grass004_1K-JPG_NormalGL.jpg',
+    uvScale: 1.3, uvRotation: 0.0,
+    brightness: 1.0, tint: [1, 1, 1],
+    roughness: 0.90, normalStrength: 1.0, specular: 1.0
+  },
+  sand: {
+    label: 'Sand / dirt',
+    color:  'textures/sand/Ground093B_1K-JPG_Color.jpg',
+    normal: 'textures/sand/Ground093B_1K-JPG_NormalGL.jpg',
+    uvScale: 1.2, uvRotation: 0.0,
+    brightness: 1.0, tint: [1, 1, 1],
+    roughness: 0.95, normalStrength: 1.0, specular: 1.0
+  },
+  snow: {
+    label: 'Snow',
+    color:  'textures/snow/Snow006_1K-JPG_Color.jpg',
+    normal: 'textures/snow/Snow006_1K-JPG_NormalGL.jpg',
+    uvScale: 0.7, uvRotation: 0.0,
+    brightness: 1.0, tint: [1, 1, 1],
+    roughness: 0.60, normalStrength: 1.0, specular: 1.0
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STATE — base material + ordered stack of auto-layers
+// ═══════════════════════════════════════════════════════════════════════
+// Each auto-layer has a rule that produces a weight in [0..1]:
+//   weight = heightMask(vHeight01) * slopeMask(slope) * strength
+// Layers are applied in order from top to bottom; later layers blend
+// on top of earlier ones. Base is always at 100%.
+const STATE = {
+  baseLayer: { material: 'rock', brightness: 1.0 },
+  layers: [
+    // id, material, height range, slope range, softness, strength, brightness,
+    // thickness (fake ledge height, world units, 0 = flat), shadowStrength (drop shadow darkness 0..1)
+    { id: 1, material: 'sand',  hMin: 0.00, hMax: 0.20, sMin: 0.00, sMax: 1.00, soft: 0.10, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.3, shadowBlur: 0.15 },
+    { id: 2, material: 'grass', hMin: 0.10, hMax: 0.70, sMin: 0.00, sMax: 0.40, soft: 0.15, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.3, shadowBlur: 0.15 },
+    { id: 3, material: 'cliff', hMin: 0.00, hMax: 1.00, sMin: 0.45, sMax: 1.00, soft: 0.15, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.3, shadowBlur: 0.15 },
+    { id: 4, material: 'snow',  hMin: 0.75, hMax: 1.00, sMin: 0.00, sMax: 0.35, soft: 0.10, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.3, shadowBlur: 0.15 }
+  ],
+  nextLayerId: 5,
+  biplanar: false,        // use biplanar projection instead of triplanar (2 taps per texture instead of 3)
+  worldSize: 18,          // max dimension of terrain in scene units
+  heightmapAspect: 1.0,   // width / height of loaded heightmap
+  // Auto height normalization from heightmap CPU analysis.
+  // vHeight in the shader is in world units, this maps to 0..1.
+  heightMinWorld: 0.0,
+  heightMaxWorld: 1.0,
+  water: {
+    enabled: false,
+    height: 0.0,            // world Y of the water plane
+    distortionScale: 3.0,
+    sizeMultiplier: 3.0,    // ripple frequency multiplier (Water shader uniform)
+    alpha: 0.6,
+    flowSpeed: 0.002,       // per-frame increment of the time uniform
+    color: '#10424c',       // base water tint
+    sunColor: '#333333'     // sun specular tint
+  }
+};
+
+const MAX_LAYERS = 8;
+
+// ═══════════════════════════════════════════════════════════════════════
+//  VERTEX SHADER — unchanged math, slope-normal scaled by world size
+// ═══════════════════════════════════════════════════════════════════════
+const vertexShader = `
+  uniform float uTime;
+  uniform float uDisplacement;
+  uniform sampler2D uHeightmap;
+  uniform float uUseHeightmap;
+  uniform float uHeightScale;
+  uniform vec2  uHeightmapTexel;  // 1.0 / (image width, image height)
+  uniform float uWorldWidth;      // world-space width of terrain
+  uniform float uWorldDepth;      // world-space depth of terrain
+
+  varying vec3 vWorldPos;
+  varying vec3 vWorldNormal;
+  varying float vHeight;
+
+  // ── Simplex noise (procedural fallback) ──
+  vec3 mod289(vec3 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
+  vec4 mod289(vec4 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
+  vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
+  vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+  float snoise(vec3 v) {
+    const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+    const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+    vec3 i = floor(v + dot(v, C.yyy));
+    vec3 x0 = v - i + dot(i, C.xxx);
+    vec3 g = step(x0.yzx, x0.xyz);
+    vec3 l = 1.0 - g;
+    vec3 i1 = min(g.xyz, l.zxy);
+    vec3 i2 = max(g.xyz, l.zxy);
+    vec3 x1 = x0 - i1 + C.xxx;
+    vec3 x2 = x0 - i2 + C.yyy;
+    vec3 x3 = x0 - D.yyy;
+    i = mod289(i);
+    vec4 p = permute(permute(permute(
+        i.z + vec4(0.0, i1.z, i2.z, 1.0))
+      + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+      + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+    float n_ = 0.142857142857;
+    vec3 ns = n_ * D.wyz - D.xzx;
+    vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+    vec4 x_ = floor(j * ns.z);
+    vec4 y_ = floor(j - 7.0 * x_);
+    vec4 x = x_ * ns.x + ns.yyyy;
+    vec4 y = y_ * ns.x + ns.yyyy;
+    vec4 h = 1.0 - abs(x) - abs(y);
+    vec4 b0 = vec4(x.xy, y.xy);
+    vec4 b1 = vec4(x.zw, y.zw);
+    vec4 s0 = floor(b0)*2.0 + 1.0;
+    vec4 s1 = floor(b1)*2.0 + 1.0;
+    vec4 sh = -step(h, vec4(0.0));
+    vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
+    vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
+    vec3 p0 = vec3(a0.xy, h.x);
+    vec3 p1 = vec3(a0.zw, h.y);
+    vec3 p2 = vec3(a1.xy, h.z);
+    vec3 p3 = vec3(a1.zw, h.w);
+    vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
+    p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+    vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+    m = m * m;
+    return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
+  }
+
+  float fbm(vec3 p) {
+    float v = 0.0;
+    float a = 0.5;
+    vec3 shift = vec3(100.0);
+    for (int i = 0; i < 6; i++) {
+      v += a * snoise(p);
+      p = p * 2.0 + shift;
+      a *= 0.5;
+    }
+    return v;
+  }
+
+  float sampleHeight(vec2 puv, vec3 objPos) {
+    if (uUseHeightmap > 0.5) {
+      return texture2D(uHeightmap, puv).r * uHeightScale;
+    }
+    float n  = fbm(objPos.xzy * 0.3 + uTime * 0.02);
+    float n2 = fbm(objPos.xzy * 0.8 + 50.0);
+    return (n * 0.7 + n2 * 0.3) * uDisplacement;
+  }
+
+  void main() {
+    vec3 pos = position;
+    float height = sampleHeight(uv, pos);
+    pos += normal * height;
+    vHeight = height;
+
+    vec4 worldPos = modelMatrix * vec4(pos, 1.0);
+    vWorldPos = worldPos.xyz;
+
+    // Finite-difference normal in world space.
+    //
+    // Orientation: after PlaneGeometry(...).rotateX(-π/2), the UV→world
+    // mapping is uv.x → +X and uv.y → -Z. So the "U" neighbor (uv + dv in
+    // +uv.y) sits at a SMALLER world Z than the current point. The tangent
+    // along world Z therefore runs in -Z with the height delta coming from
+    // (hU - hD). Without this sign fix the finite-difference normal gets
+    // mirrored across the X axis, which rotates all lighting 180° in the
+    // horizontal plane (sun-from-north lights up south-facing walls, etc).
+    float dx = 2.0 * uHeightmapTexel.x * uWorldWidth;
+    float dz = 2.0 * uHeightmapTexel.y * uWorldDepth;
+    float hL, hR, hD, hU;
+    if (uUseHeightmap > 0.5) {
+      hL = texture2D(uHeightmap, uv - vec2(uHeightmapTexel.x, 0.0)).r * uHeightScale;
+      hR = texture2D(uHeightmap, uv + vec2(uHeightmapTexel.x, 0.0)).r * uHeightScale;
+      hD = texture2D(uHeightmap, uv - vec2(0.0, uHeightmapTexel.y)).r * uHeightScale;
+      hU = texture2D(uHeightmap, uv + vec2(0.0, uHeightmapTexel.y)).r * uHeightScale;
+    } else {
+      // For the procedural branch, probe fbm at world-XZ offsets around the
+      // current point. Reconstruct world XZ from uv (uv.y → -Z).
+      vec2 wXZ = vec2((uv.x - 0.5) * uWorldWidth,
+                      -(uv.y - 0.5) * uWorldDepth);
+      vec3 oL = vec3(wXZ.x - 0.5 * dx, 0.0, wXZ.y);
+      vec3 oR = vec3(wXZ.x + 0.5 * dx, 0.0, wXZ.y);
+      vec3 oD = vec3(wXZ.x, 0.0, wXZ.y + 0.5 * dz); // uv.y - dv → world +Z
+      vec3 oU = vec3(wXZ.x, 0.0, wXZ.y - 0.5 * dz); // uv.y + dv → world -Z
+      hL = (fbm(oL.xzy * 0.3 + uTime * 0.02) * 0.7 + fbm(oL.xzy * 0.8 + 50.0) * 0.3) * uDisplacement;
+      hR = (fbm(oR.xzy * 0.3 + uTime * 0.02) * 0.7 + fbm(oR.xzy * 0.8 + 50.0) * 0.3) * uDisplacement;
+      hD = (fbm(oD.xzy * 0.3 + uTime * 0.02) * 0.7 + fbm(oD.xzy * 0.8 + 50.0) * 0.3) * uDisplacement;
+      hU = (fbm(oU.xzy * 0.3 + uTime * 0.02) * 0.7 + fbm(oU.xzy * 0.8 + 50.0) * 0.3) * uDisplacement;
+    }
+    // +X tangent runs in +world-X with height slope hR-hL.
+    // "U" neighbor is in -world-Z, so the Z-tangent runs in -Z.
+    vec3 tangentX = vec3(dx, hR - hL, 0.0);
+    vec3 tangentZ = vec3(0.0, hU - hD, -dz);
+    // cross(tX, tZ) gives +Y up for a flat surface: (+X,0,0) × (0,0,-Z) = (0, X*Z, 0) ✓
+    vWorldNormal = normalize(cross(tangentX, tangentZ));
+
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
+  }
+`;
+
+// ═══════════════════════════════════════════════════════════════════════
+//  FRAGMENT SHADER BUILDER
+// ═══════════════════════════════════════════════════════════════════════
+// We regenerate the shader when the layer stack changes (new layer,
+// removed layer, or a different material is picked in a dropdown).
+// The generator emits:
+//   - A sampler uniform trio per *unique* material used (dedupe across layers)
+//   - A fetch block for each layer that early-outs on zero weight
+function buildFragmentShader(state) {
+  // Collect unique materials referenced by base + layers
+  const usedMats = new Set();
+  usedMats.add(state.baseLayer.material);
+  for (const l of state.layers) usedMats.add(l.material);
+  const matList = [...usedMats];
+
+  // Sampler + tunable uniforms per material
+  const matUniforms = matList.map((m) => `
+  uniform sampler2D u_${m}_Color;
+  uniform sampler2D u_${m}_Normal;
+  uniform float u_${m}_UvScale;
+  uniform float u_${m}_UvRot;
+  uniform float u_${m}_Bright;
+  uniform vec3  u_${m}_Tint;
+  uniform float u_${m}_Roughness;
+  uniform float u_${m}_NormalStr;
+  uniform float u_${m}_Spec;`).join('\n');
+
+  // For each material, a sampling block that returns albedo/normal/roughness.
+  // Rotation is applied via a mat2 built from u_<m>_UvRot, and the per-material
+  // uvScale stacks with the global texScale. Roughness is a flat scalar
+  // uniform — no texture sampler — so we stay under the 16-texture-unit
+  // limit when the full 5-material stack is active.
+  const matSampleFns = matList.map((m) => `
+  void sample_${m}(vec3 wp, vec3 n, vec3 bw, float texScale,
+                   out vec3 alb, out vec3 nrm, out float rgh, out float spc) {
+    float s = texScale * u_${m}_UvScale;
+    float c = cos(u_${m}_UvRot);
+    float sn = sin(u_${m}_UvRot);
+    mat2 rot = mat2(c, -sn, sn, c);
+    alb = triplanarAlbedo(u_${m}_Color, wp, bw, s, rot) * u_${m}_Tint * u_${m}_Bright;
+    vec3 mnrm = triplanarNormal(u_${m}_Normal, wp, n, bw, s, rot);
+    nrm = normalize(mix(n, mnrm, u_${m}_NormalStr));
+    rgh = clamp(u_${m}_Roughness, 0.0, 1.0);
+    spc = u_${m}_Spec;
+  }`).join('\n');
+
+  // GLSL snippet that applies a per-layer gradient tint to `la` (the freshly-
+  // sampled material albedo). One helper, parameterized by:
+  //   prefix    - "grad" (height) or "slopeGrad" (slope)
+  //   axisExpr  - GLSL expression for the value to evaluate (h, slp, …)
+  //   tagBase   - short scope tag so the inlined block doesn't shadow vars
+  //               from a previous gradient block in the same scope
+  // Stop positions are in ABSOLUTE axis space (0..1), so a stop at 0.5 always
+  // sits at the same world height/slope regardless of the layer's hMin/hMax
+  // window. Lets you line up tints across layers (e.g. snow and rock both
+  // turning blueish at h=0.7, or all layers darkening at slope > 0.6).
+  // WebGL1 GLSL can't pass arrays as function args, so this is unrolled as a
+  // fixed-bound for-loop the compiler can handle.
+  const applyGradient = (idx, prefix, axisExpr, tagBase) => `
+      if (${prefix}EnabledLayer${idx} > 0.5) {
+        float ${tagBase}t = clamp(${axisExpr}, 0.0, 1.0);
+        vec3 ${tagBase}Col = ${prefix}StopsLayer${idx}[0].rgb;
+        float ${tagBase}PrevPos = ${prefix}StopsLayer${idx}[0].a;
+        vec3 ${tagBase}PrevCol = ${prefix}StopsLayer${idx}[0].rgb;
+        for (int gi = 1; gi < 8; gi++) {
+          if (gi >= ${prefix}StopCountLayer${idx}) break;
+          vec4 ${tagBase}Stop = ${prefix}StopsLayer${idx}[gi];
+          if (${tagBase}t <= ${tagBase}Stop.a) {
+            float ${tagBase}Span = max(${tagBase}Stop.a - ${tagBase}PrevPos, 1e-5);
+            float ${tagBase}Lt = clamp((${tagBase}t - ${tagBase}PrevPos) / ${tagBase}Span, 0.0, 1.0);
+            ${tagBase}Col = mix(${tagBase}PrevCol, ${tagBase}Stop.rgb, ${tagBase}Lt);
+            break;
+          }
+          ${tagBase}PrevPos = ${tagBase}Stop.a;
+          ${tagBase}PrevCol = ${tagBase}Stop.rgb;
+          ${tagBase}Col = ${tagBase}Stop.rgb;
+        }
+        la *= mix(vec3(1.0), ${tagBase}Col, ${prefix}StrengthLayer${idx});
+      }
+  `;
+
+  // For each auto-layer, generate a blend block
+  const layerBlocks = state.layers.map((l, idx) => {
+    const u = `uLayer${idx}`;
+    // Two gradient snippets: height-based (uses `h`) and slope-based (uses
+    // `slp`). They share the same loop shape but different uniform prefixes
+    // and different scope tags so the inlined locals don't collide.
+    const heightGrad = applyGradient(idx, 'grad',      'h',   'gh');
+    const slopeGrad  = applyGradient(idx, 'slopeGrad', 'slp', 'gs');
+    const grad = heightGrad + slopeGrad;
+    return `
+    // --- Layer ${idx}: ${l.material} ---
+    {
+      float h = vHeight01;
+      float slp = slope;
+
+      // ── Per-edge organic noise (gated to a width band around each edge) ──
+      // Each of the 4 band edges (hMin / hMax / sMin / sMax) gets its own
+      // displacement that is multiplied by a "near this edge" mask. The mask
+      // is 1 right ON the edge and falls to 0 at distance = width away, so:
+      //   - the deep interior of the layer is untouched (mask = 0)
+      //   - the deep exterior is also untouched (mask = 0)
+      //   - only the strip of width edgeNoiseWidth around the chosen edge
+      //     gets the wobble.
+      // The displacement is a single fbm2 sample (decorrelated for slope via
+      // an offset coord), shared between all 4 edges so the cost stays at
+      // 2 noise samples per pixel regardless of how many edges are toggled.
+      // edgeNoiseScaleExp lets the slider span ~5 orders of magnitude with
+      // useful precision: actual scale = 10^edgeNoiseScaleExp.
+      float hMinEdge = ${u}.x;
+      float hMaxEdge = ${u}.y;
+      float sMinEdge = ${u}.z;
+      float sMaxEdge = ${u}.w;
+      if (edgeNoiseEnabledLayer${idx} > 0.5) {
+        float scaleLin = exp2(edgeNoiseScaleLayer${idx} * 3.32192809);  // = 10^x
+        vec2 np = vWorldPos.xz * scaleLin;
+        float nH = edgeFbm2(np) * 2.0 - 1.0;
+        float nS = edgeFbm2(np + vec2(31.7, 57.3)) * 2.0 - 1.0;
+        float amt = edgeNoiseAmountLayer${idx};
+        float wd  = max(edgeNoiseWidthLayer${idx}, 1e-4);
+
+        // For each edge, build a "near edge" mask in axis units:
+        //   distance from the edge, normalized by width, clamped, then 1-x.
+        // A smoothstep gives a soft falloff so the noise blends in/out at
+        // the boundary of its own influence zone.
+        if (edgeMaskHMinLayer${idx} > 0.5) {
+          float m = 1.0 - smoothstep(0.0, wd, abs(h - hMinEdge));
+          hMinEdge += nH * amt * m;
+        }
+        if (edgeMaskHMaxLayer${idx} > 0.5) {
+          float m = 1.0 - smoothstep(0.0, wd, abs(h - hMaxEdge));
+          hMaxEdge += nH * amt * m;
+        }
+        if (edgeMaskSMinLayer${idx} > 0.5) {
+          float m = 1.0 - smoothstep(0.0, wd, abs(slp - sMinEdge));
+          sMinEdge += nS * amt * m;
+        }
+        if (edgeMaskSMaxLayer${idx} > 0.5) {
+          float m = 1.0 - smoothstep(0.0, wd, abs(slp - sMaxEdge));
+          sMaxEdge += nS * amt * m;
+        }
+      }
+
+      // Soft falloff moves OUTWARD from the band so the interior is always 1.0.
+      // This matters at the extremes (hMin=0 / sMin=0 etc) — otherwise the
+      // soft transition would pull the band inward and make flat grass at
+      // height=0 only half-opaque.
+      float hM = smoothstep(hMinEdge - softLayer${idx}, hMinEdge, h)
+               * (1.0 - smoothstep(hMaxEdge, hMaxEdge + softLayer${idx}, h));
+      float sM = smoothstep(sMinEdge - softLayer${idx}, sMinEdge, slp)
+               * (1.0 - smoothstep(sMaxEdge, sMaxEdge + softLayer${idx}, slp));
+      float w = hM * sM * strengthLayer${idx};
+
+      // ── Fake ledge / drop shadow (linked to sun) ──
+      // Treats this layer as a thin sheet sitting on top of what's below.
+      // Uses screen-space derivatives of w to reconstruct a world-XZ gradient:
+      // dw/dX = dFdx(w) / dFdx(worldX), etc. That gradient vector points
+      // toward the grass-side of the edge in world coordinates. Comparing it
+      // with the horizontal sun direction tells us which side of the edge
+      // should receive a drop shadow and which gets the lit ledge lip.
+      if (thickLayer${idx} > 0.0001 || shadowLayer${idx} > 0.0001) {
+        float dwdx = dFdx(w);
+        float dwdy = dFdy(w);
+        vec2 dXdx = vec2(dFdx(vWorldPos.x), dFdx(vWorldPos.z));
+        vec2 dXdy = vec2(dFdy(vWorldPos.x), dFdy(vWorldPos.z));
+        // Inverse 2x2 to get ∂w/∂worldXZ
+        float det = dXdx.x * dXdy.y - dXdx.y * dXdy.x;
+        vec2 gradW = vec2(0.0);
+        if (abs(det) > 1e-8) {
+          gradW = vec2(
+            ( dXdy.y * dwdx - dXdx.y * dwdy) / det,
+            (-dXdy.x * dwdx + dXdx.x * dwdy) / det
+          );
+        }
+        float gradLen = length(gradW);
+        if (gradLen > 1e-6) {
+          // gradW points INTO the grass patch (toward higher w). The edge NORMAL
+          // pointing OUT of the grass ledge (the direction a ledge-face would
+          // look) is therefore -gradW. That's the vector to compare with the
+          // sun: when -gradW aligns with sunH the ledge face is lit; when
+          // it points away, the rock behind the ledge is in drop shadow.
+          vec2 edgeDir = -gradW / gradLen;          // outward ledge-face normal
+          vec2 sunH = vec2(uSunDir.x, uSunDir.z);
+          float sunHLen = length(sunH);
+          if (sunHLen > 1e-4) {
+            sunH /= sunHLen;
+            float facing = dot(edgeDir, sunH);      // +1 ledge faces sun, -1 ledge is in shadow
+            // edgeMask gates the effect to actual ledge boundaries (places
+            // where w is changing), rather than the interior of the patch.
+            float edgeMask = smoothstep(0.0, 1.0, gradLen * thickLayer${idx} * 20.0);
+
+            // Lit lip: brighten the grass side (w is high) when the ledge faces sun.
+            float lipAmt = edgeMask * max(facing, 0.0) * w;
+
+            // Drop shadow — driven by distance from the grass edge measured in
+            // layer-mask space. distFromEdge = 0 at the edge, 1 deep in rock.
+            // shadowDistLayer controls how far the shadow reaches into the
+            // rock (as a fraction of the soft falloff region); shadowBlurLayer
+            // controls the softness of the shadow's fading tail.
+            float distFromEdge = 1.0 - w;
+            float sD = max(shadowDistLayer${idx}, 0.001);
+            float sB = max(shadowBlurLayer${idx}, 0.001);
+            float shadowFall = 1.0 - smoothstep(sD - sB * 0.5, sD + sB * 0.5, distFromEdge);
+            // Also fade out the shadow right AT the edge itself so the
+            // transition from shadow to grass is soft (kills aliasing on the
+            // grass-side boundary). This is a short smoothstep in the first
+            // few percent of distFromEdge.
+            float nearEdgeFade = smoothstep(0.0, sB * 0.5 + 0.01, distFromEdge);
+            float dropAmt = shadowFall * nearEdgeFade * edgeMask * max(-facing, 0.0) * shadowLayer${idx};
+            // Apply to the *underlying* albedo (the base/previous layers) before blend:
+            albedo *= (1.0 - dropAmt * 0.85);
+            // Brighten the grass side via bright multiplier bump:
+            // we fold this into w's sample below by scaling la after sampling.
+            // Stash lipAmt in a temp so the sample block below can use it.
+            // (GLSL: just compute now and reuse.)
+            // --- fall through, sample below handles la brighten ---
+            // Use a global-in-scope variable:
+            float lipBoost = 1.0 + lipAmt * 0.6;
+            if (w > 0.01) {
+              vec3 la; vec3 ln; float lr; float ls;
+              sample_${l.material}(vWorldPos, geoNormal, blendWeights, scale, la, ln, lr, ls);
+              ${grad}
+              la *= brightLayer${idx} * lipBoost;
+              albedo    = mix(albedo, la, w);
+              normalAcc = mix(normalAcc, ln, w);
+              roughAcc  = mix(roughAcc, lr, w);
+              specAcc   = mix(specAcc, ls, w);
+            }
+          } else if (w > 0.01) {
+            vec3 la; vec3 ln; float lr; float ls;
+            sample_${l.material}(vWorldPos, geoNormal, blendWeights, scale, la, ln, lr, ls);
+            ${grad}
+            la *= brightLayer${idx};
+            albedo    = mix(albedo, la, w);
+            normalAcc = mix(normalAcc, ln, w);
+            roughAcc  = mix(roughAcc, lr, w);
+            specAcc   = mix(specAcc, ls, w);
+          }
+        } else if (w > 0.01) {
+          vec3 la; vec3 ln; float lr; float ls;
+          sample_${l.material}(vWorldPos, geoNormal, blendWeights, scale, la, ln, lr, ls);
+          ${grad}
+          la *= brightLayer${idx};
+          albedo    = mix(albedo, la, w);
+          normalAcc = mix(normalAcc, ln, w);
+          roughAcc  = mix(roughAcc, lr, w);
+          specAcc   = mix(specAcc, ls, w);
+        }
+      } else if (w > 0.01) {
+        vec3 la; vec3 ln; float lr; float ls;
+        sample_${l.material}(vWorldPos, geoNormal, blendWeights, scale, la, ln, lr, ls);
+        ${grad}
+        la *= brightLayer${idx};
+        albedo    = mix(albedo, la, w);
+        normalAcc = mix(normalAcc, ln, w);
+        roughAcc  = mix(roughAcc, lr, w);
+        specAcc   = mix(specAcc, ls, w);
+      }
+    }`;
+  }).join('\n');
+
+  // Per-layer uniform declarations (vec4 = hMin,hMax,sMin,sMax + scalars for soft/strength/brightness/thickness/shadow)
+  const layerUniforms = state.layers.map((_, idx) => `
+  uniform vec4  uLayer${idx};
+  uniform float softLayer${idx};
+  uniform float strengthLayer${idx};
+  uniform float brightLayer${idx};
+  uniform float thickLayer${idx};
+  uniform float shadowLayer${idx};
+  uniform float shadowDistLayer${idx};
+  uniform float shadowBlurLayer${idx};
+  // Organic edge-noise on the h/slope band boundaries.
+  // Scale is stored as log10(actualScale) so the slider can span ~5 orders
+  // of magnitude. Width is the radius (in h/slp units) of the influence band
+  // around each toggled edge.
+  uniform float edgeNoiseEnabledLayer${idx};
+  uniform float edgeNoiseScaleLayer${idx};
+  uniform float edgeNoiseAmountLayer${idx};
+  uniform float edgeNoiseWidthLayer${idx};
+  uniform float edgeMaskHMinLayer${idx};
+  uniform float edgeMaskHMaxLayer${idx};
+  uniform float edgeMaskSMinLayer${idx};
+  uniform float edgeMaskSMaxLayer${idx};
+  // Height-gradient tint: up to 8 color stops stored as vec4(rgb, pos).
+  // pos < 0 marks an unused slot. Evaluated against vHeight01.
+  uniform float gradEnabledLayer${idx};
+  uniform float gradStrengthLayer${idx};
+  uniform int   gradStopCountLayer${idx};
+  uniform vec4  gradStopsLayer${idx}[8];
+  // Slope-gradient tint: same shape, evaluated against slp (0=flat, 1=cliff).
+  uniform float slopeGradEnabledLayer${idx};
+  uniform float slopeGradStrengthLayer${idx};
+  uniform int   slopeGradStopCountLayer${idx};
+  uniform vec4  slopeGradStopsLayer${idx}[8];`).join('\n');
+
+  return `
+  uniform float uTime;
+  uniform float uTexScale;
+  uniform float uBlendSharpness;
+  uniform vec3  uSunDir;
+  uniform vec3  uFogColor;
+  uniform float uFogDensity;
+  uniform vec3  uAmbientSky;
+  uniform vec3  uAmbientHorizon;
+  uniform vec3  uAmbientGround;
+  uniform float uBaseBrightness;
+  uniform float uAmbientStrength;
+  uniform float uSunStrength;
+  uniform float uRimStrength;
+  uniform float uSpecular;
+
+  // Shadow mapping
+  uniform sampler2D uShadowMap;
+  uniform mat4  uShadowMatrix;
+  uniform float uShadowEnabled;
+  uniform float uShadowBias;
+  uniform float uShadowNormalBias;
+  uniform float uShadowMapSize;
+  uniform float uShadowSoftness;
+
+  // Heightmap normalization (from CPU min/max analysis)
+  uniform float uHeightMinWorld;
+  uniform float uHeightMaxWorld;
+
+  // Topographic contour lines
+  uniform float uTopoEnabled;
+  uniform float uTopoSpacing;
+  uniform float uTopoWidth;
+  uniform float uTopoDepth;
+  uniform float uTopoDarken;
+  uniform vec4  uTopoRange;
+${matUniforms}
+${layerUniforms}
+
+  varying vec3 vWorldPos;
+  varying vec3 vWorldNormal;
+  varying float vHeight;
+
+  // ── Cheap 2D value noise + 2-octave fbm for layer-edge jitter ──
+  // Used to break up hMin/hMax/sMin/sMax band boundaries so material
+  // transitions look organic instead of razor-straight. Deliberately
+  // lightweight (no simplex, no per-octave shift) — it's sampled on the
+  // hot fragment path and we only need low-frequency wobble, not detail.
+  float edgeHash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+  }
+  float edgeValueNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = edgeHash(i);
+    float b = edgeHash(i + vec2(1.0, 0.0));
+    float c = edgeHash(i + vec2(0.0, 1.0));
+    float d = edgeHash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+  }
+  float edgeFbm2(vec2 p) {
+    return edgeValueNoise(p) * 0.65 + edgeValueNoise(p * 2.13 + 17.0) * 0.35;
+  }
+
+  // ── Triplanar helpers (with per-material UV rotation) ──
+  ${state.biplanar ? `
+  // Biplanar projection (Inigo Quilez). Samples only the 2 dominant axes
+  // instead of all 3, saving ~33% of texture reads at almost identical
+  // visual quality because the third axis has near-zero weight anyway.
+  // https://iquilezles.org/articles/biplanar/
+  //
+  // Axis select is unrolled because WebGL1 can't dynamically index vec3
+  // components with an int.
+  vec3 triplanarAlbedo(sampler2D map, vec3 wp, vec3 bw, float scale, mat2 rot) {
+    vec3 an = abs(vWorldNormal);
+    // Pick major (ma) and medium (me) axis indices.
+    // The third gets discarded.
+    float ax = an.x, ay = an.y, az = an.z;
+    vec3 cMa, cMe;
+    float wMa, wMe;
+    if (ax >= ay && ax >= az) {
+      // X is major; pick the larger of y, z for medium
+      cMa = texture2D(map, rot * (wp.yz * scale)).rgb;
+      wMa = ax;
+      if (ay >= az) { cMe = texture2D(map, rot * (wp.xz * scale)).rgb; wMe = ay; }
+      else          { cMe = texture2D(map, rot * (wp.xy * scale)).rgb; wMe = az; }
+    } else if (ay >= az) {
+      cMa = texture2D(map, rot * (wp.xz * scale)).rgb;
+      wMa = ay;
+      if (ax >= az) { cMe = texture2D(map, rot * (wp.yz * scale)).rgb; wMe = ax; }
+      else          { cMe = texture2D(map, rot * (wp.xy * scale)).rgb; wMe = az; }
+    } else {
+      cMa = texture2D(map, rot * (wp.xy * scale)).rgb;
+      wMa = az;
+      if (ax >= ay) { cMe = texture2D(map, rot * (wp.yz * scale)).rgb; wMe = ax; }
+      else          { cMe = texture2D(map, rot * (wp.xz * scale)).rgb; wMe = ay; }
+    }
+    // Sharpen the 2-way blend with the same blend-sharpness power used
+    // by triplanar so the visual matches as closely as possible.
+    vec2 w2 = vec2(wMa, wMe);
+    w2 = max(w2 - 0.5773, 0.0);
+    w2 = pow(w2, vec2(uBlendSharpness));
+    float sum = w2.x + w2.y + 1e-5;
+    return (cMa * w2.x + cMe * w2.y) / sum;
+  }
+  ` : `
+  vec3 triplanarAlbedo(sampler2D map, vec3 wp, vec3 bw, float scale, mat2 rot) {
+    vec2 uvX = rot * (wp.yz * scale);
+    vec2 uvY = rot * (wp.xz * scale);
+    vec2 uvZ = rot * (wp.xy * scale);
+    vec3 cX = texture2D(map, uvX).rgb;
+    vec3 cY = texture2D(map, uvY).rgb;
+    vec3 cZ = texture2D(map, uvZ).rgb;
+    return cX * bw.x + cY * bw.y + cZ * bw.z;
+  }
+  `}
+
+  float triplanarScalar(sampler2D map, vec3 wp, vec3 bw, float scale, mat2 rot) {
+    vec2 uvX = rot * (wp.yz * scale);
+    vec2 uvY = rot * (wp.xz * scale);
+    vec2 uvZ = rot * (wp.xy * scale);
+    float rX = texture2D(map, uvX).r;
+    float rY = texture2D(map, uvY).r;
+    float rZ = texture2D(map, uvZ).r;
+    return rX * bw.x + rY * bw.y + rZ * bw.z;
+  }
+
+  // Whiteout blend for normal maps
+  // https://bgolus.medium.com/normal-mapping-for-a-triplanar-shader-10bf39dca05a
+  ${state.biplanar ? `
+  // Biplanar whiteout-normal: only the two dominant axes are sampled.
+  vec3 triplanarNormal(sampler2D map, vec3 wp, vec3 surfN, vec3 bw, float scale, mat2 rot) {
+    vec3 an = abs(surfN);
+    float ax = an.x, ay = an.y, az = an.z;
+    vec3 contribMa, contribMe;
+    float wMa, wMe;
+    // Helper macros implemented inline because GLSL has no macros here.
+    // Each branch samples the two chosen axes and builds the whiteout-style
+    // world-space normal contribution for them.
+    if (ax >= ay && ax >= az) {
+      vec3 tX = texture2D(map, rot * (wp.yz * scale)).xyz * 2.0 - 1.0;
+      contribMa = vec3(tX.xy + surfN.zy, abs(tX.z) * surfN.x).zyx;
+      wMa = ax;
+      if (ay >= az) {
+        vec3 tY = texture2D(map, rot * (wp.xz * scale)).xyz * 2.0 - 1.0;
+        contribMe = vec3(tY.xy + surfN.xz, abs(tY.z) * surfN.y).xzy;
+        wMe = ay;
+      } else {
+        vec3 tZ = texture2D(map, rot * (wp.xy * scale)).xyz * 2.0 - 1.0;
+        contribMe = vec3(tZ.xy + surfN.xy, abs(tZ.z) * surfN.z);
+        wMe = az;
+      }
+    } else if (ay >= az) {
+      vec3 tY = texture2D(map, rot * (wp.xz * scale)).xyz * 2.0 - 1.0;
+      contribMa = vec3(tY.xy + surfN.xz, abs(tY.z) * surfN.y).xzy;
+      wMa = ay;
+      if (ax >= az) {
+        vec3 tX = texture2D(map, rot * (wp.yz * scale)).xyz * 2.0 - 1.0;
+        contribMe = vec3(tX.xy + surfN.zy, abs(tX.z) * surfN.x).zyx;
+        wMe = ax;
+      } else {
+        vec3 tZ = texture2D(map, rot * (wp.xy * scale)).xyz * 2.0 - 1.0;
+        contribMe = vec3(tZ.xy + surfN.xy, abs(tZ.z) * surfN.z);
+        wMe = az;
+      }
+    } else {
+      vec3 tZ = texture2D(map, rot * (wp.xy * scale)).xyz * 2.0 - 1.0;
+      contribMa = vec3(tZ.xy + surfN.xy, abs(tZ.z) * surfN.z);
+      wMa = az;
+      if (ax >= ay) {
+        vec3 tX = texture2D(map, rot * (wp.yz * scale)).xyz * 2.0 - 1.0;
+        contribMe = vec3(tX.xy + surfN.zy, abs(tX.z) * surfN.x).zyx;
+        wMe = ax;
+      } else {
+        vec3 tY = texture2D(map, rot * (wp.xz * scale)).xyz * 2.0 - 1.0;
+        contribMe = vec3(tY.xy + surfN.xz, abs(tY.z) * surfN.y).xzy;
+        wMe = ay;
+      }
+    }
+    vec2 w2 = vec2(wMa, wMe);
+    w2 = max(w2 - 0.5773, 0.0);
+    w2 = pow(w2, vec2(uBlendSharpness));
+    float sum = w2.x + w2.y + 1e-5;
+    return normalize((contribMa * w2.x + contribMe * w2.y) / sum);
+  }
+  ` : `
+  vec3 triplanarNormal(sampler2D map, vec3 wp, vec3 surfN, vec3 bw, float scale, mat2 rot) {
+    vec2 uvX = rot * (wp.yz * scale);
+    vec2 uvY = rot * (wp.xz * scale);
+    vec2 uvZ = rot * (wp.xy * scale);
+    vec3 tX = texture2D(map, uvX).xyz * 2.0 - 1.0;
+    vec3 tY = texture2D(map, uvY).xyz * 2.0 - 1.0;
+    vec3 tZ = texture2D(map, uvZ).xyz * 2.0 - 1.0;
+    vec3 nX = vec3(tX.xy + surfN.zy, abs(tX.z) * surfN.x);
+    vec3 nY = vec3(tY.xy + surfN.xz, abs(tY.z) * surfN.y);
+    vec3 nZ = vec3(tZ.xy + surfN.xy, abs(tZ.z) * surfN.z);
+    return normalize(
+      nX.zyx * bw.x +
+      nY.xzy * bw.y +
+      nZ.xyz * bw.z
+    );
+  }
+  `}
+${matSampleFns}
+
+  void main() {
+    vec3 geoNormal = normalize(vWorldNormal);
+
+    // Triplanar blend weights
+    vec3 blendWeights = pow(abs(geoNormal), vec3(uBlendSharpness));
+    blendWeights /= (blendWeights.x + blendWeights.y + blendWeights.z);
+
+    float scale = 1.0 / uTexScale;
+
+    // Normalize vHeight to 0..1 based on the CPU-computed min/max.
+    // This makes the layer height-thresholds work regardless of the actual
+    // heightmap amplitude, and also works for procedural FBM (falling back
+    // to the same [min..max] slider-driven range).
+    float range = max(uHeightMaxWorld - uHeightMinWorld, 0.0001);
+    float vHeight01 = clamp((vHeight - uHeightMinWorld) / range, 0.0, 1.0);
+
+    // Slope: 0 = flat (world up), 1 = vertical
+    float slope = clamp(1.0 - abs(geoNormal.y), 0.0, 1.0);
+
+    // Start with the BASE material as the fully-filled baseline.
+    vec3  albedo;
+    vec3  normalAcc;
+    float roughAcc;
+    float specAcc;
+    sample_${state.baseLayer.material}(vWorldPos, geoNormal, blendWeights, scale, albedo, normalAcc, roughAcc, specAcc);
+    albedo *= uBaseBrightness;
+
+    // Apply auto-layers in order. Each layer blends on top with its weight.
+${layerBlocks}
+
+    vec3 normal = normalize(normalAcc);
+    float roughness = clamp(roughAcc, 0.04, 1.0);
+
+    // ── Topographic contour lines ──
+    // Renders subtle horizontal grooves at constant world-Y intervals.
+    // Gate by user-configured slope + height ranges. The groove itself is
+    // faked with (a) a core darkening term on the line and (b) a normal
+    // perturbation that tilts the normal's Y component based on which side
+    // of the centerline we're on — that gets picked up by the existing
+    // NdotL below, so lit slopes shade the groove's upper lip while
+    // anti-sun slopes flip automatically.
+    float topoDark = 0.0;
+    if (uTopoEnabled > 0.5) {
+      float topoSlopeMask =
+          smoothstep(uTopoRange.x - 0.02, uTopoRange.x, slope)
+        * (1.0 - smoothstep(uTopoRange.y, uTopoRange.y + 0.02, slope));
+      float topoHeightMask =
+          smoothstep(uTopoRange.z - 0.02, uTopoRange.z, vHeight01)
+        * (1.0 - smoothstep(uTopoRange.w, uTopoRange.w + 0.02, vHeight01));
+      float topoGate = topoSlopeMask * topoHeightMask;
+      if (topoGate > 0.001) {
+        // Signed distance to the nearest isoline, in world Y units.
+        // s ∈ [-0.5, 0.5) within one spacing cell; multiply by spacing for
+        // true world-units distance. Sign tells us which side of the line.
+        float spacing = max(uTopoSpacing, 0.01);
+        float cell = vWorldPos.y / spacing;
+        float s = fract(cell) - 0.5;             // -0.5..0.5
+        float absDist = abs(s) * spacing;        // world units from centerline
+        float halfWidth = max(uTopoWidth * 0.5, 0.001);
+        // Anti-alias the line against screen-space derivative of world Y so
+        // it doesn't shimmer at distance. fwidth(vWorldPos.y) gives the
+        // pixel footprint in world units.
+        float fw = fwidth(vWorldPos.y) * 1.5;
+        float lineMask = 1.0 - smoothstep(halfWidth - fw, halfWidth + fw, absDist);
+        lineMask *= topoGate;
+
+        if (lineMask > 0.0) {
+          // Fake groove shape: tilt the normal's world-Y component by a
+          // cross-section that's + on one side of the centerline and − on
+          // the other. Using a raised cosine so the perturbation is zero
+          // exactly on the line and at the groove lips.
+          float tWithin = clamp(absDist / halfWidth, 0.0, 1.0);
+          float sideSign = s >= 0.0 ? 1.0 : -1.0;
+          // crossSection ∈ [0,1] peak at mid-slope of the groove wall
+          float crossSection = sin(tWithin * 3.1415926) * (1.0 - tWithin);
+          // Apply to the normal's Y component. The geoNormal's horizontal
+          // component defines the "uphill" direction; we push normal away
+          // from that direction to make a visible groove wall.
+          // geoNormal.xz points in the DOWNHILL horizontal direction (a
+          // slope's normal leans away from the ridge). The uphill direction
+          // is therefore -geoNormal.xz. We tilt the per-pixel normal toward
+          // this uphill vector on the upper wall of the groove and away on
+          // the lower wall, so the sun's NdotL picks up a real groove-face
+          // shading difference that flips with sun direction.
+          vec2 downhill = vec2(geoNormal.x, geoNormal.z);
+          float horizLen = length(downhill);
+          if (horizLen > 1e-4) {
+            vec2 uphill = -downhill / horizLen;
+            // s > 0 = above centerline in world Y = upper wall of groove on
+            // an uphill-facing slope → tilt normal toward uphill.
+            // s < 0 = lower wall → tilt toward downhill.
+            vec3 tilt = vec3(sideSign * uphill.x, 0.0, sideSign * uphill.y);
+            float amt = crossSection * uTopoDepth * lineMask;
+            normal = normalize(normal + tilt * amt);
+          }
+          // Core darkening gives a hint of inked-in contour even on
+          // flat-facing slopes where the normal tilt can't produce
+          // strong shading difference.
+          topoDark = lineMask * uTopoDarken * (1.0 - tWithin);
+          albedo *= (1.0 - topoDark);
+        }
+      }
+    }
+
+    // ── Lighting ──
+    // Clamp the detail normal to the same hemisphere as the geometric
+    // normal so normal-map detail can never rotate a pixel past 90° from
+    // the surface (that was leaving cliff faces in full shadow when the
+    // sun hit them geometrically). The clamped normal still carries all
+    // the micro detail for diffuse shading.
+    vec3 sunDir = normalize(uSunDir);
+    vec3 shadeN = normal;
+    if (dot(shadeN, geoNormal) < 0.0) shadeN = reflect(shadeN, geoNormal);
+    float NdotLgeo = max(dot(geoNormal, sunDir), 0.0);
+    float NdotL    = max(dot(shadeN,    sunDir), 0.0);
+
+    vec3 warmLight = vec3(1.0, 0.92, 0.8);
+
+    // Hemispherical ambient uses the geometric normal for the same reason.
+    float upDot = clamp(geoNormal.y, -1.0, 1.0);
+    vec3 ambient;
+    if (upDot >= 0.0) {
+      ambient = mix(uAmbientHorizon, uAmbientSky, upDot);
+    } else {
+      ambient = mix(uAmbientHorizon, uAmbientGround, -upDot);
+    }
+
+    // ── Shadow sampling: normal-offset + 16-tap Poisson PCF ──
+    // Normal-offset bias pushes the sample point along the surface normal by
+    // an amount proportional to the slope. This cures most "stripe" acne
+    // without the self-shadowing problems of pure depth bias.
+    // The 16-tap Poisson disk gives proper soft edges.
+    float shadow = 1.0;
+    if (uShadowEnabled > 0.5) {
+      // Fade to fully-shadowed as NdotL approaches 0 so backfacing terrain
+      // never self-shadows (terminator problem).
+      float terminator = smoothstep(0.0, 0.25, NdotLgeo);
+
+      // Normal-offset in world space before projecting into light clip space.
+      float normalOffset = uShadowNormalBias * (1.0 - NdotLgeo);
+      vec3 biasedWorldPos = vWorldPos + geoNormal * normalOffset;
+
+      vec4 shadowCoord = uShadowMatrix * vec4(biasedWorldPos, 1.0);
+      vec3 sc = shadowCoord.xyz / shadowCoord.w;
+
+      if (sc.x >= 0.0 && sc.x <= 1.0 && sc.z <= 1.0 && sc.y >= 0.0 && sc.y <= 1.0) {
+        float depth = sc.z - uShadowBias;
+        vec2 texel = 1.0 / vec2(uShadowMapSize);
+        const vec4 unpack = vec4(1.0, 1.0/255.0, 1.0/65025.0, 1.0/16581375.0);
+
+        // Poisson disk (16 samples, pre-rotated set from common PCF kernels)
+        vec2 poisson[16];
+        poisson[ 0] = vec2(-0.613392,  0.617481);
+        poisson[ 1] = vec2( 0.170019, -0.040254);
+        poisson[ 2] = vec2(-0.299417,  0.791925);
+        poisson[ 3] = vec2( 0.645680,  0.493210);
+        poisson[ 4] = vec2(-0.651784,  0.717887);
+        poisson[ 5] = vec2( 0.421003,  0.027070);
+        poisson[ 6] = vec2(-0.817194, -0.271096);
+        poisson[ 7] = vec2(-0.705374, -0.668203);
+        poisson[ 8] = vec2( 0.977050, -0.108615);
+        poisson[ 9] = vec2( 0.063326,  0.142369);
+        poisson[10] = vec2( 0.203528,  0.214331);
+        poisson[11] = vec2(-0.667531,  0.326090);
+        poisson[12] = vec2(-0.098422, -0.295755);
+        poisson[13] = vec2(-0.885922,  0.215369);
+        poisson[14] = vec2( 0.566637,  0.605213);
+        poisson[15] = vec2( 0.039766, -0.396100);
+
+        // Cheap per-pixel rotation to break banding from the fixed kernel.
+        float ang = fract(sin(dot(vWorldPos.xz, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+        float cs = cos(ang);
+        float sn = sin(ang);
+        mat2 rot = mat2(cs, -sn, sn, cs);
+
+        float radius = uShadowSoftness;
+        float sum = 0.0;
+        for (int i = 0; i < 16; i++) {
+          vec2 off = rot * poisson[i] * texel * radius;
+          vec4 rgba = texture2D(uShadowMap, sc.xy + off);
+          float s = dot(rgba, unpack);
+          sum += (depth > s) ? 0.0 : 1.0;
+        }
+        shadow = (sum / 16.0) * terminator;
+      } else {
+        shadow = 1.0;
+      }
+    }
+
+    // Diffuse uses the textured NdotL (so micro-relief shows up) while the
+    // shadow factor and terminator are driven by NdotLgeo elsewhere. A
+    // small floor of NdotLgeo keeps the face from going completely dark
+    // on the detail-normal side of a wiggle.
+    float diffuseTerm = max(NdotL, NdotLgeo * 0.15);
+    vec3 lighting = ambient * uAmbientStrength + warmLight * diffuseTerm * shadow * uSunStrength;
+
+    vec3 viewDir = normalize(cameraPosition - vWorldPos);
+    vec3 halfDir = normalize(sunDir + viewDir);
+    float NdotH = max(dot(normal, halfDir), 0.0);
+    float shininess = mix(120.0, 4.0, roughness);
+    float specStrength = (1.0 - roughness) * uSpecular * specAcc;
+    vec3 specular = warmLight * pow(NdotH, shininess) * specStrength * shadow;
+
+    // Ambient occlusion approximation from normalized height
+    float ao = smoothstep(0.0, 0.7, vHeight01) * 0.5 + 0.5;
+
+    vec3 color = albedo * lighting * ao + specular;
+
+    float rim = 1.0 - max(dot(viewDir, normal), 0.0);
+    color += pow(rim, 4.0) * vec3(0.15, 0.25, 0.4) * uRimStrength;
+
+    float dist = length(cameraPosition - vWorldPos);
+    float fd = dist * uFogDensity;
+    float fogFactor = clamp(1.0 - exp(-fd * fd), 0.0, 0.85);
+    color = mix(color, uFogColor, fogFactor);
+
+    color = color / (color + vec3(1.0));
+    color = pow(color, vec3(1.0 / 2.2));
+
+    gl_FragColor = vec4(color, 1.0);
+  }
+  `;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  THREE.JS SETUP
+// ═══════════════════════════════════════════════════════════════════════
+const container = document.getElementById('canvas-container');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x0a0a0f);
+renderer.outputEncoding = THREE.sRGBEncoding;
+// ACES Filmic tone mapping is what the BAR map viewer uses — without a
+// tonemapper the Water shader's HDR-ish output gets clipped/washed-out
+// by the sRGB gamma curve and the surface looks like flat painted plastic.
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+container.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 4000);
+camera.position.set(12, 10, 16);
+camera.lookAt(0, 0, 0);
+
+// ═══════════════════════════════════════════════════════════════════════
+//  TEXTURE CACHE — load each unique file only once
+// ═══════════════════════════════════════════════════════════════════════
+const texLoader = new THREE.TextureLoader();
+const texCache = {};
+function getTexture(path, { srgb = false } = {}) {
+  if (texCache[path]) return texCache[path];
+  const t = texLoader.load(path);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  if (srgb) t.encoding = THREE.sRGBEncoding;
+  texCache[path] = t;
+  return t;
+}
+
+// Pre-load every material in the library up-front. Cheap and simple.
+for (const m of Object.values(MATERIAL_LIBRARY)) {
+  getTexture(m.color, { srgb: true });
+  getTexture(m.normal);
+  getTexture(m.rough);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  SHARED UNIFORMS (not layer-specific)
+// ═══════════════════════════════════════════════════════════════════════
+const sharedUniforms = {
+  uTime: { value: 0 },
+  uTexScale: { value: 2.5 },
+  uBlendSharpness: { value: 2.0 },
+  uDisplacement: { value: 2.8 },
+  uSunDir: { value: new THREE.Vector3(0.6, 0.8, 0.3) },
+  uFogColor: { value: new THREE.Vector3(0.55, 0.62, 0.75) },
+  uFogDensity: { value: 0.004 },
+  uAmbientSky:    { value: new THREE.Vector3(0.55, 0.65, 0.85) },
+  uAmbientHorizon:{ value: new THREE.Vector3(0.45, 0.50, 0.60) },
+  uAmbientGround: { value: new THREE.Vector3(0.20, 0.18, 0.15) },
+  uAmbientStrength: { value: 0.35 },
+  uSunStrength:     { value: 1.15 },
+  uRimStrength:     { value: 0.0 },
+  uSpecular:        { value: 0.12 },
+
+  // Shadow mapping — bound to DirectionalLight.shadow after scene setup.
+  uShadowMap:        { value: null },
+  uShadowMatrix:     { value: new THREE.Matrix4() },
+  uShadowEnabled:    { value: 0.0 },
+  uShadowBias:       { value: 0.00005 },
+  uShadowNormalBias: { value: 0.04 },
+  uShadowMapSize:    { value: 4096 },
+  uShadowSoftness:   { value: 2.5 },
+
+  uHeightmap: { value: null },
+  uUseHeightmap: { value: 0.0 },
+  uHeightScale: { value: 4.0 },
+  uHeightmapTexel: { value: new THREE.Vector2(1.0 / 1024.0, 1.0 / 1024.0) },
+  uWorldWidth: { value: STATE.worldSize },
+  uWorldDepth: { value: STATE.worldSize },
+
+  uHeightMinWorld: { value: 0.0 },
+  uHeightMaxWorld: { value: 1.0 },
+
+  // Topographic contour lines. Rendered as subtle horizontal isolines at
+  // constant world-Y intervals. A fake normal perturbation makes them look
+  // like shallow grooves, which means the existing NdotL/shadow pipeline
+  // automatically gives them sun-linked shading — grooves on a sunward-
+  // facing slope shade on their upper lip, anti-sun slopes flip the shade.
+  uTopoEnabled:  { value: 0.0 },
+  uTopoSpacing:  { value: 0.6 },   // world-Y distance between lines
+  uTopoWidth:    { value: 0.04 },  // world-Y thickness of each line
+  uTopoDepth:    { value: 0.6 },   // fake groove depth (normal perturbation strength)
+  uTopoDarken:   { value: 0.35 },  // how much the core of the line is darkened
+  // xy = slope min/max (0..1), zw = height01 min/max
+  uTopoRange:    { value: new THREE.Vector4(0.0, 1.0, 0.0, 1.0) }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+//  GEOMETRY / MATERIAL REBUILD
+// ═══════════════════════════════════════════════════════════════════════
+let terrain = null;
+let currentGeo = null;
+let currentMat = null;
+// Hoisted here because rebuildGeometry() runs during initial setup, before
+// the heightmap section further down would otherwise declare it.
+let lastHeightmapInfo = null;
+
+function rebuildGeometry() {
+  if (currentGeo) currentGeo.dispose();
+  const width = STATE.worldSize;
+  const depth = STATE.worldSize / STATE.heightmapAspect;
+  // If a heightmap is loaded, match the grid to its pixel resolution
+  // (one quad per texel-minus-one) so every displacement sample lands on
+  // an actual vertex. Otherwise fall back to a world-size-scaled grid.
+  let segX, segZ;
+  if (lastHeightmapInfo) {
+    segX = Math.min(4096, Math.max(8, lastHeightmapInfo.width  - 1));
+    segZ = Math.min(4096, Math.max(8, lastHeightmapInfo.height - 1));
+  } else {
+    segX = Math.min(1024, Math.max(200, Math.round(width * 25)));
+    segZ = Math.min(1024, Math.max(200, Math.round(depth * 25)));
+  }
+  currentGeo = new THREE.PlaneGeometry(width, depth, segX, segZ);
+  currentGeo.rotateX(-Math.PI / 2);
+  if (terrain) terrain.geometry = currentGeo;
+  sharedUniforms.uWorldWidth.value = width;
+  sharedUniforms.uWorldDepth.value = depth;
+  const triCount = currentGeo.index
+    ? currentGeo.index.count / 3
+    : currentGeo.attributes.position.count / 3;
+  document.getElementById('stat-tris').textContent = `TRIS: ${Math.round(triCount / 1000)}K`;
+}
+
+// Build a fixed-length array of 8 THREE.Vector4 for a gradient's stops,
+// packed as vec4(r, g, b, pos). Unused slots get pos = -1 so the shader
+// loop ignores them. Input stops are sorted by pos so the shader's
+// left-to-right walk produces the correct interpolation.
+function buildStopsArray(stops) {
+  const sorted = [...(stops || [])].sort((a, b) => a.pos - b.pos);
+  const arr = [];
+  for (let i = 0; i < 8; i++) {
+    if (i < sorted.length) {
+      const s = sorted[i];
+      arr.push(new THREE.Vector4(s.color[0], s.color[1], s.color[2], s.pos));
+    } else {
+      arr.push(new THREE.Vector4(0, 0, 0, -1));
+    }
+  }
+  return arr;
+}
+
+// Push the current gradient state for a given auto-layer into the live
+// uniforms so the GPU sees the new stop positions/colors on the next draw.
+// Keeps the Vector4 identities intact (three.js' .set() in-place) so the
+// uniform upload path stays cheap.
+// Live-push a layer's gradient state to the shader uniforms. `kind` selects
+// which gradient to push: 'height' uses the gradLayer*  uniforms and reads
+// from layer.gradient; 'slope' uses slopeGradLayer* and layer.slopeGradient.
+// Same shape, just different prefixes — kept as one function so the live-
+// update path is identical and we only have one place to maintain.
+function pushGradientUniforms(idx, kind = 'height') {
+  const u = currentMat && currentMat.uniforms;
+  if (!u) return;
+  const layer = STATE.layers[idx];
+  if (!layer) return;
+  const prefix = kind === 'slope' ? 'slopeGrad' : 'grad';
+  if (!u[`${prefix}StopsLayer${idx}`]) return;
+  const g = (kind === 'slope' ? layer.slopeGradient : layer.gradient)
+            || { enabled: 0, strength: 1, stops: [] };
+  u[`${prefix}EnabledLayer${idx}`].value  = g.enabled ? 1.0 : 0.0;
+  u[`${prefix}StrengthLayer${idx}`].value = g.strength ?? 1.0;
+  const sorted = [...(g.stops || [])].sort((a, b) => a.pos - b.pos);
+  u[`${prefix}StopCountLayer${idx}`].value = Math.min(sorted.length, 8);
+  const arr = u[`${prefix}StopsLayer${idx}`].value;
+  for (let i = 0; i < 8; i++) {
+    if (i < sorted.length) {
+      const s = sorted[i];
+      arr[i].set(s.color[0], s.color[1], s.color[2], s.pos);
+    } else {
+      arr[i].set(0, 0, 0, -1);
+    }
+  }
+}
+
+function buildUniformsForState() {
+  // Fresh clone of shared uniforms so ShaderMaterial gets its own references
+  const u = {};
+  for (const [k, v] of Object.entries(sharedUniforms)) {
+    u[k] = v;   // keep reference — we want slider writes to propagate
+  }
+
+  // Material sampler + tunable uniforms (one set per unique material).
+  // The tunable uniforms use ONE shared reference per material id, stored on
+  // MATERIAL_LIBRARY[id]._uniforms, so Materials panel slider writes reach
+  // every subsequent material rebuild without needing a full shader recompile.
+  const mats = new Set();
+  mats.add(STATE.baseLayer.material);
+  for (const l of STATE.layers) mats.add(l.material);
+  for (const id of mats) {
+    const m = MATERIAL_LIBRARY[id];
+    if (!m._uniforms) {
+      m._uniforms = {
+        UvScale:    { value: m.uvScale },
+        UvRot:      { value: m.uvRotation },
+        Bright:     { value: m.brightness },
+        Tint:       { value: new THREE.Vector3(...m.tint) },
+        Roughness:  { value: m.roughness },
+        NormalStr:  { value: m.normalStrength },
+        Spec:       { value: m.specular }
+      };
+    }
+    u[`u_${id}_Color`]     = { value: getTexture(m.color, { srgb: true }) };
+    u[`u_${id}_Normal`]    = { value: getTexture(m.normal) };
+    u[`u_${id}_UvScale`]   = m._uniforms.UvScale;
+    u[`u_${id}_UvRot`]     = m._uniforms.UvRot;
+    u[`u_${id}_Bright`]    = m._uniforms.Bright;
+    u[`u_${id}_Tint`]      = m._uniforms.Tint;
+    u[`u_${id}_Roughness`] = m._uniforms.Roughness;
+    u[`u_${id}_NormalStr`] = m._uniforms.NormalStr;
+    u[`u_${id}_Spec`]      = m._uniforms.Spec;
+  }
+
+  // Per-layer uniforms (vec4 = hMin,hMax,sMin,sMax; plus soft, strength, brightness, thickness, shadowStrength)
+  STATE.layers.forEach((l, idx) => {
+    u[`uLayer${idx}`] = { value: new THREE.Vector4(l.hMin, l.hMax, l.sMin, l.sMax) };
+    u[`softLayer${idx}`] = { value: l.soft };
+    u[`strengthLayer${idx}`] = { value: l.visible === false ? 0.0 : l.strength };
+    u[`brightLayer${idx}`] = { value: l.brightness };
+    u[`thickLayer${idx}`] = { value: l.thickness ?? 0.0 };
+    u[`shadowLayer${idx}`] = { value: l.shadowStrength ?? 0.0 };
+    u[`shadowDistLayer${idx}`] = { value: l.shadowDist ?? 0.3 };
+    u[`shadowBlurLayer${idx}`] = { value: l.shadowBlur ?? 0.15 };
+    const en = l.edgeNoise || {};
+    u[`edgeNoiseEnabledLayer${idx}`] = { value: en.enabled ? 1.0 : 0.0 };
+    u[`edgeNoiseScaleLayer${idx}`]   = { value: en.scale   ?? -1.0  }; // log10 → 0.1
+    u[`edgeNoiseAmountLayer${idx}`]  = { value: en.amount  ?? 0.08 };
+    u[`edgeNoiseWidthLayer${idx}`]   = { value: en.width   ?? 0.15 };
+    u[`edgeMaskHMinLayer${idx}`]     = { value: en.maskHMin ? 1.0 : 0.0 };
+    u[`edgeMaskHMaxLayer${idx}`]     = { value: en.maskHMax ? 1.0 : 0.0 };
+    u[`edgeMaskSMinLayer${idx}`]     = { value: en.maskSMin ? 1.0 : 0.0 };
+    u[`edgeMaskSMaxLayer${idx}`]     = { value: en.maskSMax ? 1.0 : 0.0 };
+    // Gradient uniforms — packed stops array (vec4 = rgb + pos), fixed size 8.
+    const grad = l.gradient || { enabled: 0, strength: 1, stops: [] };
+    u[`gradEnabledLayer${idx}`]  = { value: grad.enabled ? 1.0 : 0.0 };
+    u[`gradStrengthLayer${idx}`] = { value: grad.strength ?? 1.0 };
+    u[`gradStopCountLayer${idx}`] = { value: Math.min(grad.stops.length, 8) };
+    const stops = buildStopsArray(grad.stops);
+    u[`gradStopsLayer${idx}`] = { value: stops };
+    // Slope-gradient uniforms — same shape as height gradient.
+    const sgrad = l.slopeGradient || { enabled: 0, strength: 1, stops: [] };
+    u[`slopeGradEnabledLayer${idx}`]  = { value: sgrad.enabled ? 1.0 : 0.0 };
+    u[`slopeGradStrengthLayer${idx}`] = { value: sgrad.strength ?? 1.0 };
+    u[`slopeGradStopCountLayer${idx}`] = { value: Math.min(sgrad.stops.length, 8) };
+    u[`slopeGradStopsLayer${idx}`] = { value: buildStopsArray(sgrad.stops) };
+  });
+
+  // Base layer brightness is a single global uniform
+  u.uBaseBrightness = { value: STATE.baseLayer.brightness };
+
+  return u;
+}
+
+// Cached static shader metrics, refreshed on every rebuildMaterial().
+// tapsPerPixel = texture2D samples the fragment shader performs per pixel
+// for a fully-opaque terrain sample (base + every active auto-layer, plus
+// PCF shadow taps). aluOps is a rough operator count — useful as a relative
+// indicator, not an absolute cycle count.
+let shaderStats = {
+  tapsPerPixel: 0,
+  tapsMat: 0,
+  tapsShadow: 0,
+  tapsPerMaterial: 0,
+  materialCount: 0,
+  projection: 'triplanar',
+  aluOps: 0,
+  varyings: 0,
+  uniforms: 0,
+  fragLines: 0,
+  vertLines: 0
+};
+
+function countOccurrences(str, pattern) {
+  const m = str.match(pattern);
+  return m ? m.length : 0;
+}
+
+function computeShaderStats(fragSrc, vertSrc, state) {
+  // --- Texture taps ---
+  // Each material needs color + normal; triplanar samples each on 3 axes
+  // (2 samplers × 3 axes = 6 taps), biplanar on only the 2 dominant axes
+  // (2 samplers × 2 axes = 4 taps). Only UNIQUE materials referenced by
+  // the base + auto-layers cost taps (the shader coalesces duplicates).
+  const usedMats = new Set([state.baseLayer.material, ...state.layers.map(l => l.material)]);
+  const materialCount = usedMats.size;
+  const tapsPerMaterial = state.biplanar ? 4 : 6;
+  // But each auto-layer also calls sample_XX() — even if two layers share
+  // a material, the sample function runs once per layer at the blend site.
+  // So the real tap count is: 1 base + N layers, each costing tapsPerMaterial.
+  const sampleCallsPerPixel = 1 + state.layers.length;
+  const materialTaps = tapsPerMaterial * sampleCallsPerPixel;
+  // PCF shadow sampling: 16-tap Poisson disk when shadows are enabled.
+  const shadowTaps = sharedUniforms.uShadowEnabled.value > 0.5 ? 16 : 0;
+  const tapsPerPixel = materialTaps + shadowTaps;
+
+  // --- ALU op count (rough) ---
+  // Strip comments + string literals so we don't count them.
+  const stripped = fragSrc
+    .replace(/\/\/.*$/gm, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+  // Count arithmetic operators that aren't part of ++, --, ==, <=, >=, !=
+  // Also count common built-in math calls.
+  const arith = countOccurrences(stripped, /[^+\-*/=<>!]([+\-*/])[^+\-*/=]/g);
+  const builtins = countOccurrences(stripped,
+    /\b(dot|cross|normalize|length|mix|smoothstep|clamp|pow|exp|sqrt|min|max|abs|sin|cos|reflect|texture2D|dFdx|dFdy)\s*\(/g);
+  const aluOps = arith + builtins * 3;  // builtins roughly cost 3 ops each
+
+  // --- Varyings / uniforms (from the actual declared ones) ---
+  const varyings = countOccurrences(fragSrc + vertSrc, /\bvarying\s+\w+\s+\w+/g);
+  const uniforms = countOccurrences(fragSrc + vertSrc, /\buniform\s+\w+\s+\w+/g);
+
+  shaderStats = {
+    tapsPerPixel,
+    tapsMat: materialTaps,
+    tapsShadow: shadowTaps,
+    tapsPerMaterial,
+    materialCount,
+    projection: state.biplanar ? 'biplanar' : 'triplanar',
+    aluOps,
+    varyings,
+    uniforms,
+    fragLines: fragSrc.split('\n').length,
+    vertLines: vertSrc.split('\n').length
+  };
+  updateStaticStatsUI();
+}
+
+function formatNum(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'G';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+function updateStaticStatsUI() {
+  const el = id => document.getElementById(id);
+  const s = shaderStats;
+  el('stat-taps').textContent =
+    `TAPS/PX: ${s.tapsPerPixel} (${s.tapsMat} mat + ${s.tapsShadow} shadow)`;
+  el('stat-proj').textContent =
+    `PROJ: ${s.projection} (${s.tapsPerMaterial}/mat × ${1 + STATE.layers.length} calls)`;
+  el('stat-alu').textContent  = `ALU OPS: ~${s.aluOps}`;
+  el('stat-varyings').textContent =
+    `VARY/UNI: ${s.varyings}/${s.uniforms}`;
+}
+
+function rebuildMaterial() {
+  const fragmentShader = buildFragmentShader(STATE);
+  const uniforms = buildUniformsForState();
+  const mat = new THREE.ShaderMaterial({
+    vertexShader,
+    fragmentShader,
+    uniforms,
+    side: THREE.DoubleSide,
+    extensions: { derivatives: true }
+  });
+  if (currentMat) currentMat.dispose();
+  currentMat = mat;
+  if (terrain) terrain.material = mat;
+  computeShaderStats(fragmentShader, vertexShader, STATE);
+}
+
+// Initial build
+rebuildGeometry();
+rebuildMaterial();
+terrain = new THREE.Mesh(currentGeo, currentMat);
+terrain.castShadow = true;
+terrain.receiveShadow = true;
+scene.add(terrain);
+
+// Seed a reasonable procedural height range so layer thresholds work
+// before any heightmap is loaded.
+{
+  const d = sharedUniforms.uDisplacement.value;
+  sharedUniforms.uHeightMinWorld.value = -d;
+  sharedUniforms.uHeightMaxWorld.value =  d;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  WATER PLANE (THREE.Water from r128 examples)
+// ═══════════════════════════════════════════════════════════════════════
+// THREE.Water is a screen-space-normal water shader: it grabs the scene as a
+// reflection RT, distorts the UVs with a tiling normal map, and blends with
+// a sun specular highlight. Cheap enough to run alongside the terrain at
+// 60 fps. We size the plane generously beyond the terrain so the water
+// extends to the horizon, and reuse the world Y from the slider for height.
+let water = null;
+
+// Water normals — we use the same 4-tile bump map the BAR map viewer ships
+// with, fetched from their map_blueprint repo. It's a tileable normal
+// designed for big oceans (4 packed scales) and looks dramatically better
+// than three.js's stock waternormals.jpg at large plane sizes.
+let waterNormalsTex = null;
+function getWaterNormals() {
+  if (waterNormalsTex) return waterNormalsTex;
+  waterNormalsTex = new THREE.TextureLoader().load(
+    'https://raw.githubusercontent.com/beyond-all-reason/map_blueprint/a7db394716730e102f84442ed35fe3f7644a01fc/maps/waterbump_4tiles.png',
+    t => {
+      t.wrapS = t.wrapT = THREE.RepeatWrapping;
+      t.needsUpdate = true;
+    },
+    undefined,
+    err => console.warn('water normals failed to load:', err)
+  );
+  waterNormalsTex.wrapS = waterNormalsTex.wrapT = THREE.RepeatWrapping;
+  return waterNormalsTex;
+}
+
+function buildWater() {
+  if (typeof THREE.Water !== 'function') {
+    console.warn('THREE.Water failed to load — check the examples script.');
+    return;
+  }
+  if (water) {
+    scene.remove(water);
+    water.geometry.dispose();
+    water.material.dispose();
+    water = null;
+  }
+  // The BAR map viewer sizes its water plane to match the terrain footprint
+  // exactly (with a 12-unit margin). We do the same — a slightly inset
+  // plane prevents the water edges from poking into the skirt walls. The
+  // skybox handles "ocean to the horizon" so we don't need a 6× plane.
+  const extent = STATE.worldSize * 2;
+  const geo = new THREE.PlaneGeometry(extent, extent);
+  water = new THREE.Water(geo, {
+    textureWidth: 512,
+    textureHeight: 512,
+    waterNormals: getWaterNormals(),
+    sunDirection: new THREE.Vector3().copy(sharedUniforms.uSunDir.value).normalize(),
+    sunColor: new THREE.Color(STATE.water.sunColor),
+    waterColor: new THREE.Color(STATE.water.color),
+    distortionScale: STATE.water.distortionScale,
+    fog: scene.fog !== undefined,
+    alpha: STATE.water.alpha
+  });
+  water.rotation.x = -Math.PI / 2;
+  water.position.y = STATE.water.height;
+  water.visible = STATE.water.enabled;
+  water.castShadow = false;
+  water.receiveShadow = false;
+  // Match the BAR map viewer exactly: transparent + no depth write so the
+  // water doesn't punch a hole in the depth buffer, and a small polygon
+  // offset to push it behind the terrain plane and avoid z-fighting at
+  // shorelines.
+  water.material.transparent = true;
+  water.material.depthWrite = false;
+  water.material.polygonOffset = true;
+  water.material.polygonOffsetFactor = -1.0;
+  water.material.polygonOffsetUnits = -1.0;
+  if (water.material.uniforms.size) {
+    water.material.uniforms.size.value = STATE.water.sizeMultiplier;
+  }
+  if (water.material.uniforms.alpha) {
+    water.material.uniforms.alpha.value = STATE.water.alpha;
+  }
+  // The Water shader's reflection RT renders the entire scene a second
+  // time. If scene.background is null (no skybox loaded) the RT comes
+  // back transparent and the water surface looks like flat painted glass.
+  // Wrap onBeforeRender to substitute a fallback background during the
+  // mirror pass and restore it immediately after.
+  const originalOnBeforeRender = water.onBeforeRender;
+  water.onBeforeRender = function (rndr, scn, cam, ...rest) {
+    const savedBackground = scn.background;
+    if (!savedBackground) scn.background = new THREE.Color(0x9bc3e0);
+    if (originalOnBeforeRender) originalOnBeforeRender.call(this, rndr, scn, cam, ...rest);
+    scn.background = savedBackground;
+  };
+  scene.add(water);
+}
+buildWater();
+
+// ═══════════════════════════════════════════════════════════════════════
+//  DIRECTIONAL SUN LIGHT + SHADOW MAP
+// ═══════════════════════════════════════════════════════════════════════
+// three.js renders the shadow depth pass automatically once the light and
+// renderer are configured. Our custom ShaderMaterial doesn't integrate with
+// the built-in shadow system, so we:
+//   1. Give the terrain a customDepthMaterial that replicates our vertex
+//      displacement (otherwise the depth pass uses a flat plane).
+//   2. Bind light.shadow.map.texture + light.shadow.matrix into our fragment
+//      shader uniforms each frame and PCF-sample them manually.
+const sunLight = new THREE.DirectionalLight(0xfff1d6, 1.0);
+sunLight.position.set(18, 28, 10);
+sunLight.target.position.set(0, 0, 0);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(4096, 4096);
+sunLight.shadow.camera.near = 1;
+sunLight.shadow.camera.far = 200;
+{
+  const s = 45;
+  sunLight.shadow.camera.left   = -s;
+  sunLight.shadow.camera.right  =  s;
+  sunLight.shadow.camera.top    =  s;
+  sunLight.shadow.camera.bottom = -s;
+}
+// We do our own bias in the fragment shader via normal-offset, so leave
+// three.js's built-in bias neutral.
+sunLight.shadow.bias = 0.0;
+scene.add(sunLight);
+scene.add(sunLight.target);
+
+// Custom depth material — mirrors the displacement in our vertex shader so the
+// shadow map represents the actual terrain surface, not the flat plane.
+const depthVertexShader = `
+  uniform float uDisplacement;
+  uniform sampler2D uHeightmap;
+  uniform float uUseHeightmap;
+  uniform float uHeightScale;
+  uniform float uTime;
+
+  vec3 mod289(vec3 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
+  vec4 mod289(vec4 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
+  vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
+  vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+  float snoise(vec3 v) {
+    const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+    const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+    vec3 i = floor(v + dot(v, C.yyy));
+    vec3 x0 = v - i + dot(i, C.xxx);
+    vec3 g = step(x0.yzx, x0.xyz);
+    vec3 l = 1.0 - g;
+    vec3 i1 = min(g.xyz, l.zxy);
+    vec3 i2 = max(g.xyz, l.zxy);
+    vec3 x1 = x0 - i1 + C.xxx;
+    vec3 x2 = x0 - i2 + C.yyy;
+    vec3 x3 = x0 - D.yyy;
+    i = mod289(i);
+    vec4 p = permute(permute(permute(
+        i.z + vec4(0.0, i1.z, i2.z, 1.0))
+      + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+      + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+    float n_ = 0.142857142857;
+    vec3 ns = n_ * D.wyz - D.xzx;
+    vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+    vec4 x_ = floor(j * ns.z);
+    vec4 y_ = floor(j - 7.0 * x_);
+    vec4 x = x_ * ns.x + ns.yyyy;
+    vec4 y = y_ * ns.x + ns.yyyy;
+    vec4 h = 1.0 - abs(x) - abs(y);
+    vec4 b0 = vec4(x.xy, y.xy);
+    vec4 b1 = vec4(x.zw, y.zw);
+    vec4 s0 = floor(b0)*2.0 + 1.0;
+    vec4 s1 = floor(b1)*2.0 + 1.0;
+    vec4 sh = -step(h, vec4(0.0));
+    vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
+    vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
+    vec3 p0 = vec3(a0.xy, h.x);
+    vec3 p1 = vec3(a0.zw, h.y);
+    vec3 p2 = vec3(a1.xy, h.z);
+    vec3 p3 = vec3(a1.zw, h.w);
+    vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
+    p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+    vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+    m = m * m;
+    return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
+  }
+  float fbm(vec3 p) {
+    float v = 0.0; float a = 0.5; vec3 shift = vec3(100.0);
+    for (int i = 0; i < 6; i++) { v += a * snoise(p); p = p * 2.0 + shift; a *= 0.5; }
+    return v;
+  }
+  void main() {
+    vec3 pos = position;
+    float height;
+    if (uUseHeightmap > 0.5) {
+      height = texture2D(uHeightmap, uv).r * uHeightScale;
+    } else {
+      float n  = fbm(pos.xzy * 0.3 + uTime * 0.02);
+      float n2 = fbm(pos.xzy * 0.8 + 50.0);
+      height = (n * 0.7 + n2 * 0.3) * uDisplacement;
+    }
+    pos += normal * height;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+  }
+`;
+// Three.js packs depth into RGBA by default; mirror that so our shader can
+// unpack with the standard constants. (UnpackDepth helper in main shader below.)
+const depthFragmentShader = `
+  vec4 packDepthToRGBA(float v) {
+    vec4 r = vec4(1.0, 255.0, 65025.0, 16581375.0) * v;
+    r = fract(r);
+    r -= r.yzww * vec4(1.0/255.0, 1.0/255.0, 1.0/255.0, 0.0);
+    return r;
+  }
+  void main() {
+    gl_FragColor = packDepthToRGBA(gl_FragCoord.z);
+  }
+`;
+const depthMaterial = new THREE.ShaderMaterial({
+  vertexShader: depthVertexShader,
+  fragmentShader: depthFragmentShader,
+  uniforms: {
+    uDisplacement:  sharedUniforms.uDisplacement,
+    uHeightmap:     sharedUniforms.uHeightmap,
+    uUseHeightmap:  sharedUniforms.uUseHeightmap,
+    uHeightScale:   sharedUniforms.uHeightScale,
+    uTime:          sharedUniforms.uTime
+  },
+  side: THREE.DoubleSide
+});
+terrain.customDepthMaterial = depthMaterial;
+
+sharedUniforms.uShadowEnabled.value = 1.0;
+sharedUniforms.uShadowMapSize.value = sunLight.shadow.mapSize.x;
+
+// ═══════════════════════════════════════════════════════════════════════
+//  HEIGHTMAP LOADING — 16-bit PNG via UPNG.js → Float32 DataTexture
+// ═══════════════════════════════════════════════════════════════════════
+// The browser's default <img>/canvas path decodes every PNG to 8-bit RGBA,
+// which quantizes heightmaps to 256 levels and shows up as terracing. To
+// keep real 16-bit precision (65536 levels) we parse PNG bytes ourselves
+// via UPNG.js and build a DataTexture with FloatType.
+
+// (lastHeightmapInfo is hoisted above near rebuildGeometry)
+// Raw PNG bytes of the currently loaded heightmap so it can be embedded
+// as base64 in saved config files (null when running procedural).
+let currentHeightmapBytes = null;
+let currentHeightmapDataURL = null;  // base64 of PNG, format: data:image/png;base64,...
+let currentSkyboxDataURL = null;
+
+// Convert an ArrayBuffer of PNG bytes to a data URL. Used to embed a
+// previously-fetched heightmap in the saved config.
+// Skybox loader still uses the <img>/canvas path, so keep this helper for
+// re-encoding loaded HTMLImageElements to an embeddable data URL.
+function imageToDataURL(image, mime = 'image/png') {
+  const w = image.naturalWidth || image.width;
+  const h = image.naturalHeight || image.height;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(image, 0, 0);
+  return c.toDataURL(mime);
+}
+
+function arrayBufferToDataURL(buf, mime = 'image/png') {
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return `data:${mime};base64,` + btoa(binary);
+}
+
+function dataURLToArrayBuffer(dataURL) {
+  const base64 = dataURL.split(',', 2)[1];
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+// Decode PNG bytes (8- or 16-bit, gray or RGBA) to a normalized Float32
+// array of height values in [0,1]. Uses UPNG.js' internal decode path so
+// we bypass the canvas 8-bit bottleneck.
+//
+// UPNG.decode() returns { width, height, depth, ctype, frames, data, ... }.
+// `png.data` is the decoded first-frame pixel bytes for non-APNG images,
+// but its exact concrete type varies between versions — sometimes a
+// Uint8Array, sometimes a raw ArrayBuffer. Wrap defensively.
+function decodePNGToHeightFloat32(arrayBuffer) {
+  if (typeof UPNG === 'undefined') {
+    throw new Error('UPNG.js not loaded — check the <script> tag.');
+  }
+  const png = UPNG.decode(arrayBuffer);
+  const w = png.width;
+  const h = png.height;
+  const depth = png.depth;   // bits per sample: 8 or 16
+  const ctype = png.ctype;   // 0 gray, 2 RGB, 3 palette, 4 gray+A, 6 RGBA
+
+  // Prefer UPNG's own frame unpacker when available — it handles interlace,
+  // filtering, and 16-bit unpacking consistently.
+  let raw;
+  if (png.frames && png.frames.length && UPNG.toRGBA8) {
+    // toRGBA8 always returns 8-bit per channel; only use it as a fallback
+    // for weird PNG layouts. We'll detect this below.
+    raw = null;
+  }
+  if (!raw) {
+    raw = png.data instanceof Uint8Array
+      ? png.data
+      : new Uint8Array(png.data);
+  }
+
+  const samplesPerPixel =
+    ctype === 0 ? 1 :
+    ctype === 2 ? 3 :
+    ctype === 4 ? 2 :
+    ctype === 6 ? 4 : 1;
+  const bytesPerSample = depth === 16 ? 2 : 1;
+  const stride = samplesPerPixel * bytesPerSample;
+  const expectedBytes = w * h * stride;
+
+  const out = new Float32Array(w * h);
+
+  // If the raw buffer doesn't match what we expect (e.g. interlaced PNG
+  // that UPNG didn't unpack into a flat array), fall back to toRGBA8 and
+  // accept the 8-bit truncation rather than crashing.
+  if (raw.length < expectedBytes) {
+    console.warn(
+      `PNG raw buffer (${raw.length}) < expected (${expectedBytes}) for ` +
+      `${w}x${h} depth=${depth} ctype=${ctype}. Falling back to toRGBA8.`
+    );
+    const rgba = new Uint8Array(UPNG.toRGBA8(png)[0]);
+    const norm = 1.0 / 255.0;
+    for (let p = 0; p < w * h; p++) out[p] = rgba[p * 4] * norm;
+    return { width: w, height: h, depth: 8, data: out };
+  }
+
+  if (depth === 16) {
+    const norm = 1.0 / 65535.0;
+    for (let p = 0; p < w * h; p++) {
+      const i = p * stride;
+      // First sample is gray/red. PNG stores 16-bit samples big-endian.
+      out[p] = ((raw[i] << 8) | raw[i + 1]) * norm;
+    }
+  } else {
+    const norm = 1.0 / 255.0;
+    for (let p = 0; p < w * h; p++) {
+      out[p] = raw[p * stride] * norm;
+    }
+  }
+  return { width: w, height: h, depth, data: out };
+}
+
+function analyzeHeightFloat32(heightInfo) {
+  const { width: w, height: h, data } = heightInfo;
+  let min = Infinity, max = -Infinity;
+  // Sample every 4th pixel in each direction to keep it cheap.
+  for (let y = 0; y < h; y += 4) {
+    for (let x = 0; x < w; x += 4) {
+      const v = data[y * w + x];
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+  }
+  if (!isFinite(min)) { min = 0; max = 1; }
+  return { width: w, height: h, min, max };
+}
+
+// Build a float DataTexture from a Float32Array of heights in [0,1].
+// WebGL1 + ANGLE refuses LuminanceFormat+FloatType on many GPUs ("Invalid
+// internal format 0x1909"), so we expand to RGBA and replicate the height
+// into all four channels. The shader samples .r.
+function makeHeightDataTexture(heightInfo) {
+  const { width: w, height: h, data } = heightInfo;
+  const rgba = new Float32Array(w * h * 4);
+  for (let p = 0, o = 0; p < w * h; p++, o += 4) {
+    const v = data[p];
+    rgba[o    ] = v;
+    rgba[o + 1] = v;
+    rgba[o + 2] = v;
+    rgba[o + 3] = 1.0;
+  }
+  const tex = new THREE.DataTexture(
+    rgba, w, h,
+    THREE.RGBAFormat,
+    THREE.FloatType
+  );
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  // UPNG delivers rows top-to-bottom (row 0 = top of the PNG). WebGL uv.y=0
+  // samples the BOTTOM row of a texture, so we need flipY=true to push row 0
+  // of our array to uv.y=1 (top). Without this the whole heightmap renders
+  // mirrored across the X axis — the top of the PNG ends up in the south.
+  tex.flipY = true;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function applyHeightFloat32(heightInfo) {
+  const info = analyzeHeightFloat32(heightInfo);
+  lastHeightmapInfo = info;
+  STATE.heightmapAspect = info.width / info.height;
+
+  const tex = makeHeightDataTexture(heightInfo);
+  const prev = sharedUniforms.uHeightmap.value;
+  sharedUniforms.uHeightmap.value = tex;
+  sharedUniforms.uUseHeightmap.value = 1.0;
+  sharedUniforms.uHeightmapTexel.value.set(1.0 / info.width, 1.0 / info.height);
+
+  const scale = sharedUniforms.uHeightScale.value;
+  sharedUniforms.uHeightMinWorld.value = info.min * scale;
+  sharedUniforms.uHeightMaxWorld.value = info.max * scale;
+
+  rebuildGeometry();
+
+  if (prev && prev !== tex) prev.dispose();
+  document.getElementById('stat-shader').textContent =
+    `SHADER: HEIGHTMAP ${info.width}x${info.height} (${heightInfo.depth}bit)`;
+}
+
+function loadHeightmapFromArrayBuffer(buf) {
+  try {
+    const heightInfo = decodePNGToHeightFloat32(buf);
+    applyHeightFloat32(heightInfo);
+    currentHeightmapBytes = buf;
+    currentHeightmapDataURL = arrayBufferToDataURL(buf);
+  } catch (err) {
+    console.error('PNG decode failed:', err);
+  }
+}
+
+function loadHeightmapFromURL(url, { silent = false } = {}) {
+  // Data URL fast path: parse the base64 and feed straight into the decoder.
+  if (url.startsWith('data:')) {
+    try {
+      loadHeightmapFromArrayBuffer(dataURLToArrayBuffer(url));
+    } catch (err) {
+      if (!silent) console.warn('Heightmap data URL decode failed:', err);
+    }
+    return;
+  }
+  fetch(url)
+    .then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.arrayBuffer();
+    })
+    .then(buf => loadHeightmapFromArrayBuffer(buf))
+    .catch(err => { if (!silent) console.warn('Heightmap load failed:', url, err); });
+}
+
+function loadHeightmapFromFile(file) {
+  file.arrayBuffer()
+    .then(buf => loadHeightmapFromArrayBuffer(buf))
+    .catch(err => console.warn('Heightmap file read failed:', err));
+}
+
+function clearHeightmap() {
+  sharedUniforms.uUseHeightmap.value = 0.0;
+  STATE.heightmapAspect = 1.0;
+  currentHeightmapBytes = null;
+  currentHeightmapDataURL = null;
+  // For procedural mode use a ±uDisplacement range as a reasonable guess
+  const d = sharedUniforms.uDisplacement.value;
+  sharedUniforms.uHeightMinWorld.value = -d;
+  sharedUniforms.uHeightMaxWorld.value =  d;
+  rebuildGeometry();
+  document.getElementById('stat-shader').textContent = 'SHADER: PROCEDURAL';
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  ORBIT CAMERA (LMB = orbit, RMB/MMB/Shift+LMB = pan, wheel = zoom)
+// ═══════════════════════════════════════════════════════════════════════
+let dragMode = null;  // 'orbit' | 'pan' | null
+let prevMouse = { x: 0, y: 0 };
+let orbitAngle = 0.8;
+let orbitPitch = 0.45;
+let orbitDist = 18;
+const panTarget = new THREE.Vector3(0, 0, 0);
+
+function updateCamera() {
+  const x = orbitDist * Math.sin(orbitAngle) * Math.cos(orbitPitch);
+  const y = orbitDist * Math.sin(orbitPitch);
+  const z = orbitDist * Math.cos(orbitAngle) * Math.cos(orbitPitch);
+  camera.position.set(x, y, z).add(panTarget);
+  camera.lookAt(panTarget);
+}
+updateCamera();
+
+renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+
+renderer.domElement.addEventListener('pointerdown', e => {
+  // RMB (2), MMB (1), or Shift+LMB → pan. LMB → orbit.
+  if (e.button === 2 || e.button === 1 || (e.button === 0 && e.shiftKey)) {
+    dragMode = 'pan';
+  } else if (e.button === 0) {
+    dragMode = 'orbit';
+  } else {
+    return;
+  }
+  prevMouse = { x: e.clientX, y: e.clientY };
+  e.preventDefault();
+});
+window.addEventListener('pointerup', () => { dragMode = null; });
+window.addEventListener('pointermove', e => {
+  if (!dragMode) return;
+  const dx = e.clientX - prevMouse.x;
+  const dy = e.clientY - prevMouse.y;
+  prevMouse = { x: e.clientX, y: e.clientY };
+
+  if (dragMode === 'orbit') {
+    orbitAngle -= dx * 0.005;
+    orbitPitch = Math.max(0.05, Math.min(1.4, orbitPitch + dy * 0.005));
+  } else {
+    // Pan in screen space along the camera's right/up vectors, scaled by
+    // distance so the cursor stays roughly glued to the terrain.
+    const panScale = orbitDist * 0.0018;
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+    const up    = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+    panTarget.addScaledVector(right, -dx * panScale);
+    panTarget.addScaledVector(up,     dy * panScale);
+  }
+  updateCamera();
+});
+renderer.domElement.addEventListener('wheel', e => {
+  orbitDist = Math.max(4, Math.min(60, orbitDist + e.deltaY * 0.02));
+  updateCamera();
+  e.preventDefault();
+}, { passive: false });
+
+// ═══════════════════════════════════════════════════════════════════════
+//  GLOBAL SLIDERS (Shader + Heightmap groups)
+// ═══════════════════════════════════════════════════════════════════════
+document.getElementById('texScale').addEventListener('input', e => {
+  sharedUniforms.uTexScale.value = parseFloat(e.target.value);
+});
+document.getElementById('blendSharp').addEventListener('input', e => {
+  sharedUniforms.uBlendSharpness.value = parseFloat(e.target.value);
+});
+document.getElementById('fogDensity').addEventListener('input', e => {
+  sharedUniforms.uFogDensity.value = parseFloat(e.target.value);
+});
+document.getElementById('displacement').addEventListener('input', e => {
+  sharedUniforms.uDisplacement.value = parseFloat(e.target.value);
+  if (sharedUniforms.uUseHeightmap.value < 0.5) {
+    const d = parseFloat(e.target.value);
+    sharedUniforms.uHeightMinWorld.value = -d;
+    sharedUniforms.uHeightMaxWorld.value =  d;
+  }
+});
+document.getElementById('heightScale').addEventListener('input', e => {
+  const s = parseFloat(e.target.value);
+  sharedUniforms.uHeightScale.value = s;
+  // Re-scale the world-space min/max so the normalization keeps matching
+  if (sharedUniforms.uUseHeightmap.value > 0.5 && lastHeightmapInfo) {
+    sharedUniforms.uHeightMinWorld.value = lastHeightmapInfo.min * s;
+    sharedUniforms.uHeightMaxWorld.value = lastHeightmapInfo.max * s;
+  }
+});
+document.getElementById('worldSize').addEventListener('input', e => {
+  STATE.worldSize = parseFloat(e.target.value);
+  rebuildGeometry();
+  // Water plane geometry is sized relative to the terrain — rebuild so it
+  // keeps covering the horizon when the world grows or shrinks.
+  buildWater();
+});
+
+// ── Water controls ──
+document.getElementById('waterEnabled').addEventListener('input', e => {
+  STATE.water.enabled = parseFloat(e.target.value) > 0.5;
+  if (water) water.visible = STATE.water.enabled;
+});
+document.getElementById('waterHeight').addEventListener('input', e => {
+  STATE.water.height = parseFloat(e.target.value);
+  if (water) water.position.y = STATE.water.height;
+});
+document.getElementById('waterDistortion').addEventListener('input', e => {
+  STATE.water.distortionScale = parseFloat(e.target.value);
+  if (water && water.material.uniforms.distortionScale) {
+    water.material.uniforms.distortionScale.value = STATE.water.distortionScale;
+  }
+});
+document.getElementById('waterSize').addEventListener('input', e => {
+  STATE.water.sizeMultiplier = parseFloat(e.target.value);
+  if (water && water.material.uniforms.size) {
+    water.material.uniforms.size.value = STATE.water.sizeMultiplier;
+  }
+});
+document.getElementById('waterFlow').addEventListener('input', e => {
+  STATE.water.flowSpeed = parseFloat(e.target.value);
+});
+document.getElementById('waterColor').addEventListener('input', e => {
+  STATE.water.color = e.target.value;
+  if (water && water.material.uniforms.waterColor) {
+    water.material.uniforms.waterColor.value.set(e.target.value);
+  }
+});
+document.getElementById('waterSunColor').addEventListener('input', e => {
+  STATE.water.sunColor = e.target.value;
+  if (water && water.material.uniforms.sunColor) {
+    water.material.uniforms.sunColor.value.set(e.target.value);
+  }
+});
+document.getElementById('waterAlpha').addEventListener('input', e => {
+  STATE.water.alpha = parseFloat(e.target.value);
+  if (water && water.material.uniforms.alpha) {
+    water.material.uniforms.alpha.value = STATE.water.alpha;
+  }
+});
+
+// Lighting group
+document.getElementById('ambientStrength').addEventListener('input', e => {
+  sharedUniforms.uAmbientStrength.value = parseFloat(e.target.value);
+});
+document.getElementById('sunStrength').addEventListener('input', e => {
+  sharedUniforms.uSunStrength.value = parseFloat(e.target.value);
+});
+document.getElementById('rimStrength').addEventListener('input', e => {
+  sharedUniforms.uRimStrength.value = parseFloat(e.target.value);
+});
+document.getElementById('specular').addEventListener('input', e => {
+  sharedUniforms.uSpecular.value = parseFloat(e.target.value);
+});
+function updateSunDir() {
+  const x = parseFloat(document.getElementById('sunX').value);
+  const y = parseFloat(document.getElementById('sunY').value);
+  const z = parseFloat(document.getElementById('sunZ').value);
+  sharedUniforms.uSunDir.value.set(x, y, z).normalize();
+}
+document.getElementById('sunX').addEventListener('input', updateSunDir);
+document.getElementById('sunY').addEventListener('input', updateSunDir);
+document.getElementById('sunZ').addEventListener('input', updateSunDir);
+document.getElementById('shadowBias').addEventListener('input', e => {
+  sharedUniforms.uShadowBias.value = parseFloat(e.target.value);
+});
+document.getElementById('shadowNormalBias').addEventListener('input', e => {
+  sharedUniforms.uShadowNormalBias.value = parseFloat(e.target.value);
+});
+document.getElementById('shadowSoftness').addEventListener('input', e => {
+  sharedUniforms.uShadowSoftness.value = parseFloat(e.target.value);
+});
+document.getElementById('shadowEnabled').addEventListener('input', e => {
+  sharedUniforms.uShadowEnabled.value = parseFloat(e.target.value);
+});
+
+// Topo contour lines — all scalars + a vec4 range packed from 4 sliders.
+document.getElementById('topoEnabled').addEventListener('input', e => {
+  sharedUniforms.uTopoEnabled.value = parseFloat(e.target.value);
+});
+document.getElementById('topoSpacing').addEventListener('input', e => {
+  sharedUniforms.uTopoSpacing.value = parseFloat(e.target.value);
+});
+document.getElementById('topoWidth').addEventListener('input', e => {
+  sharedUniforms.uTopoWidth.value = parseFloat(e.target.value);
+});
+document.getElementById('topoDepth').addEventListener('input', e => {
+  sharedUniforms.uTopoDepth.value = parseFloat(e.target.value);
+});
+document.getElementById('topoDarken').addEventListener('input', e => {
+  sharedUniforms.uTopoDarken.value = parseFloat(e.target.value);
+});
+function updateTopoRange() {
+  const sMin = parseFloat(document.getElementById('topoSlopeMin').value);
+  const sMax = parseFloat(document.getElementById('topoSlopeMax').value);
+  const hMin = parseFloat(document.getElementById('topoHeightMin').value);
+  const hMax = parseFloat(document.getElementById('topoHeightMax').value);
+  sharedUniforms.uTopoRange.value.set(sMin, sMax, hMin, hMax);
+}
+document.getElementById('topoSlopeMin').addEventListener('input', updateTopoRange);
+document.getElementById('topoSlopeMax').addEventListener('input', updateTopoRange);
+document.getElementById('topoHeightMin').addEventListener('input', updateTopoRange);
+document.getElementById('topoHeightMax').addEventListener('input', updateTopoRange);
+
+// ── Inject numeric readouts next to every left-panel slider ──
+// Each step count drives how many decimals we display (0.0005 → 4, 0.01 → 2,
+// 0.1 → 1, 1 → 0). Keeps the format consistent with the slider precision.
+function formatForStep(step) {
+  if (step >= 1)     return v => v.toFixed(0);
+  if (step >= 0.1)   return v => v.toFixed(1);
+  if (step >= 0.01)  return v => v.toFixed(2);
+  if (step >= 0.001) return v => v.toFixed(3);
+  return v => v.toFixed(4);
+}
+document.querySelectorAll('.hud-bottom-left .control-row input[type="range"]').forEach(input => {
+  const step = parseFloat(input.step) || 0.01;
+  const fmt = formatForStep(step);
+  const span = document.createElement('span');
+  span.className = 'val';
+  span.textContent = fmt(parseFloat(input.value));
+  input.after(span);
+  input.addEventListener('input', () => {
+    span.textContent = fmt(parseFloat(input.value));
+  });
+  // Stash the formatter so syncSlidersFromState can refresh the readout too.
+  input._valSpan = span;
+  input._valFmt  = fmt;
+});
+
+document.getElementById('btn-load-heightmap').addEventListener('click', () => {
+  document.getElementById('heightmapFile').click();
+});
+document.getElementById('heightmapFile').addEventListener('change', e => {
+  if (e.target.files && e.target.files[0]) loadHeightmapFromFile(e.target.files[0]);
+});
+document.getElementById('btn-clear-heightmap').addEventListener('click', clearHeightmap);
+
+renderer.domElement.addEventListener('dragover', e => e.preventDefault());
+renderer.domElement.addEventListener('drop', e => {
+  e.preventDefault();
+  if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+    loadHeightmapFromFile(e.dataTransfer.files[0]);
+  }
+});
+
+// Try default heightmap next to HTML — but only if no saved config will
+// restore a different one (otherwise the default races with the restore).
+if (!localStorage.getItem('bar-triplanar-config')) {
+  loadHeightmapFromURL('heightmap.png', { silent: true });
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  SKYBOX (equirectangular) + hemi-ambient sampling
+// ═══════════════════════════════════════════════════════════════════════
+// Samples three horizontal bands from the equirectangular image and feeds
+// the results to the shader's hemispherical ambient term. This gives a
+// cheap IBL-like tint without any cubemap/convolution work.
+function sampleHemiAmbient(image) {
+  const w = image.naturalWidth || image.width;
+  const h = image.naturalHeight || image.height;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(image, 0, 0);
+  const data = ctx.getImageData(0, 0, w, h).data;
+
+  function averageBand(yStart, yEnd) {
+    let r = 0, g = 0, b = 0, n = 0;
+    // Sample sparsely to keep it fast on large images
+    const stepY = Math.max(1, Math.floor((yEnd - yStart) / 16));
+    const stepX = Math.max(1, Math.floor(w / 64));
+    for (let y = yStart; y < yEnd; y += stepY) {
+      for (let x = 0; x < w; x += stepX) {
+        const i = (y * w + x) * 4;
+        r += data[i]; g += data[i + 1]; b += data[i + 2];
+        n++;
+      }
+    }
+    return [r / n / 255, g / n / 255, b / n / 255];
+  }
+
+  // Top 15% = sky, middle 30% around the horizon, bottom 15% = ground
+  const sky      = averageBand(0, Math.floor(h * 0.15));
+  const horizon  = averageBand(Math.floor(h * 0.40), Math.floor(h * 0.60));
+  const ground   = averageBand(Math.floor(h * 0.85), h);
+
+  return { sky, horizon, ground };
+}
+
+function applySkyboxTexture(texture, image) {
+  texture.mapping = THREE.EquirectangularReflectionMapping;
+  texture.encoding = THREE.sRGBEncoding;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+
+  const prev = scene.background;
+  scene.background = texture;
+  if (prev && prev.dispose && prev !== texture) prev.dispose();
+
+  // Feed hemi-ambient uniforms from image analysis
+  const hemi = sampleHemiAmbient(image);
+  sharedUniforms.uAmbientSky.value.set(...hemi.sky);
+  sharedUniforms.uAmbientHorizon.value.set(...hemi.horizon);
+  sharedUniforms.uAmbientGround.value.set(...hemi.ground);
+
+  // Adjust fog color to the horizon tint so distant terrain blends into the sky
+  sharedUniforms.uFogColor.value.set(...hemi.horizon);
+}
+
+function loadSkyboxFromURL(url, { silent = false } = {}) {
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  img.onload = () => {
+    const tex = new THREE.Texture(img);
+    tex.needsUpdate = true;
+    applySkyboxTexture(tex, img);
+    // JPEG re-encode — skyboxes are photographic so JPEG is drastically
+    // smaller than PNG and the loss is imperceptible for ambient sampling.
+    currentSkyboxDataURL = url.startsWith('data:') ? url : imageToDataURL(img, 'image/jpeg');
+  };
+  img.onerror = () => { if (!silent) console.warn('Skybox load failed:', url); };
+  img.src = url;
+}
+
+function loadSkyboxFromFile(file) {
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    const tex = new THREE.Texture(img);
+    tex.needsUpdate = true;
+    applySkyboxTexture(tex, img);
+    currentSkyboxDataURL = imageToDataURL(img, 'image/jpeg');
+    URL.revokeObjectURL(url);
+  };
+  img.src = url;
+}
+
+function clearSkybox() {
+  currentSkyboxDataURL = null;
+  const prev = scene.background;
+  scene.background = null;
+  if (prev && prev.dispose) prev.dispose();
+  // Reset ambient uniforms to defaults
+  sharedUniforms.uAmbientSky.value.set(0.55, 0.65, 0.85);
+  sharedUniforms.uAmbientHorizon.value.set(0.45, 0.50, 0.60);
+  sharedUniforms.uAmbientGround.value.set(0.20, 0.18, 0.15);
+  sharedUniforms.uFogColor.value.set(0.55, 0.62, 0.75);
+}
+
+document.getElementById('btn-load-skybox').addEventListener('click', () => {
+  document.getElementById('skyboxFile').click();
+});
+document.getElementById('skyboxFile').addEventListener('change', e => {
+  if (e.target.files && e.target.files[0]) loadSkyboxFromFile(e.target.files[0]);
+});
+document.getElementById('btn-clear-skybox').addEventListener('click', clearSkybox);
+
+// Try default skybox next to HTML (same race-avoidance as the heightmap).
+if (!localStorage.getItem('bar-triplanar-config')) {
+  loadSkyboxFromURL('textures/skybox/sky_cloudySea.webp', { silent: true });
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  SAVE / LOAD CONFIG
+// ═══════════════════════════════════════════════════════════════════════
+// Serializes everything the user can tune: the layer stack, per-slider
+// values, and world/lighting state. Textures and image files themselves
+// aren't embedded — the config just references material IDs + sliders.
+const CONFIG_VERSION = 1;
+const CONFIG_LS_KEY  = 'bar-triplanar-config';
+
+function collectConfig() {
+  const u = sharedUniforms;
+  return {
+    version: CONFIG_VERSION,
+    state: {
+      worldSize: STATE.worldSize,
+      heightmapAspect: STATE.heightmapAspect,
+      baseLayer: { ...STATE.baseLayer },
+      layers: STATE.layers.map(l => ({ ...l }))
+    },
+    shader: {
+      texScale: u.uTexScale.value,
+      blendSharp: u.uBlendSharpness.value,
+      fogDensity: u.uFogDensity.value,
+      displacement: u.uDisplacement.value,
+      heightScale: u.uHeightScale.value
+    },
+    lighting: {
+      ambientStrength: u.uAmbientStrength.value,
+      sunStrength: u.uSunStrength.value,
+      rimStrength: u.uRimStrength.value,
+      specular: u.uSpecular.value,
+      sunDir: u.uSunDir.value.toArray(),
+      shadowBias: u.uShadowBias.value,
+      shadowNormalBias: u.uShadowNormalBias.value,
+      shadowSoftness: u.uShadowSoftness.value,
+      shadowEnabled: u.uShadowEnabled.value
+    },
+    topo: {
+      enabled: u.uTopoEnabled.value,
+      spacing: u.uTopoSpacing.value,
+      width:   u.uTopoWidth.value,
+      depth:   u.uTopoDepth.value,
+      darken:  u.uTopoDarken.value,
+      range:   u.uTopoRange.value.toArray()
+    },
+    water: { ...STATE.water },
+    materials: Object.fromEntries(
+      Object.entries(MATERIAL_LIBRARY).map(([id, m]) => [id, {
+        uvScale: m.uvScale,
+        uvRotation: m.uvRotation,
+        brightness: m.brightness,
+        tint: [...m.tint],
+        roughness: m.roughness,
+        normalStrength: m.normalStrength,
+        specular: m.specular
+      }])
+    ),
+    // Embed the actual image bytes as data URLs so a saved config can
+    // fully restore the scene without needing the original source files.
+    assets: {
+      heightmap: currentHeightmapDataURL,
+      skybox:    currentSkyboxDataURL
+    }
+  };
+}
+
+function applyConfig(cfg) {
+  if (!cfg || cfg.version !== CONFIG_VERSION) {
+    console.warn('Config version mismatch or empty, skipping.');
+    return;
+  }
+  const u = sharedUniforms;
+
+  // STATE — rebuild the layer stack
+  if (cfg.state) {
+    if (typeof cfg.state.worldSize === 'number') STATE.worldSize = cfg.state.worldSize;
+    if (cfg.state.baseLayer) STATE.baseLayer = { ...cfg.state.baseLayer };
+    if (Array.isArray(cfg.state.layers)) STATE.layers = cfg.state.layers.map(l => ({ ...l }));
+  }
+
+  // Shader group
+  if (cfg.shader) {
+    if (typeof cfg.shader.texScale === 'number')     u.uTexScale.value = cfg.shader.texScale;
+    if (typeof cfg.shader.blendSharp === 'number')   u.uBlendSharpness.value = cfg.shader.blendSharp;
+    if (typeof cfg.shader.fogDensity === 'number')   u.uFogDensity.value = cfg.shader.fogDensity;
+    if (typeof cfg.shader.displacement === 'number') u.uDisplacement.value = cfg.shader.displacement;
+    if (typeof cfg.shader.heightScale === 'number')  u.uHeightScale.value = cfg.shader.heightScale;
+  }
+
+  // Lighting group
+  if (cfg.lighting) {
+    if (typeof cfg.lighting.ambientStrength === 'number') u.uAmbientStrength.value = cfg.lighting.ambientStrength;
+    if (typeof cfg.lighting.sunStrength === 'number')     u.uSunStrength.value = cfg.lighting.sunStrength;
+    if (typeof cfg.lighting.rimStrength === 'number')     u.uRimStrength.value = cfg.lighting.rimStrength;
+    if (typeof cfg.lighting.specular === 'number')        u.uSpecular.value = cfg.lighting.specular;
+    if (Array.isArray(cfg.lighting.sunDir))               u.uSunDir.value.fromArray(cfg.lighting.sunDir).normalize();
+    if (typeof cfg.lighting.shadowBias === 'number')       u.uShadowBias.value = cfg.lighting.shadowBias;
+    if (typeof cfg.lighting.shadowNormalBias === 'number') u.uShadowNormalBias.value = cfg.lighting.shadowNormalBias;
+    if (typeof cfg.lighting.shadowSoftness === 'number')   u.uShadowSoftness.value = cfg.lighting.shadowSoftness;
+    if (typeof cfg.lighting.shadowEnabled === 'number')    u.uShadowEnabled.value = cfg.lighting.shadowEnabled;
+  }
+
+  // Topo contour lines
+  if (cfg.topo) {
+    if (typeof cfg.topo.enabled === 'number') u.uTopoEnabled.value = cfg.topo.enabled;
+    if (typeof cfg.topo.spacing === 'number') u.uTopoSpacing.value = cfg.topo.spacing;
+    if (typeof cfg.topo.width === 'number')   u.uTopoWidth.value   = cfg.topo.width;
+    if (typeof cfg.topo.depth === 'number')   u.uTopoDepth.value   = cfg.topo.depth;
+    if (typeof cfg.topo.darken === 'number')  u.uTopoDarken.value  = cfg.topo.darken;
+    if (Array.isArray(cfg.topo.range))        u.uTopoRange.value.fromArray(cfg.topo.range);
+  }
+
+  // Water plane settings — rebuild the mesh so size + height take effect.
+  if (cfg.water) {
+    Object.assign(STATE.water, cfg.water);
+    buildWater();
+  }
+
+  // Per-material tunables — write back to MATERIAL_LIBRARY and live uniforms
+  if (cfg.materials) {
+    for (const [id, mc] of Object.entries(cfg.materials)) {
+      const m = MATERIAL_LIBRARY[id];
+      if (!m) continue;
+      if (typeof mc.uvScale === 'number')        m.uvScale = mc.uvScale;
+      if (typeof mc.uvRotation === 'number')     m.uvRotation = mc.uvRotation;
+      if (typeof mc.brightness === 'number')     m.brightness = mc.brightness;
+      if (Array.isArray(mc.tint))                m.tint = [...mc.tint];
+      if (typeof mc.roughness === 'number')      m.roughness = mc.roughness;
+      if (typeof mc.normalStrength === 'number') m.normalStrength = mc.normalStrength;
+      if (typeof mc.specular === 'number')       m.specular = mc.specular;
+      const mu = ensureMatUniforms(id);
+      mu.UvScale.value   = m.uvScale;
+      mu.UvRot.value     = m.uvRotation;
+      mu.Bright.value    = m.brightness;
+      mu.Tint.value.set(...m.tint);
+      mu.Roughness.value = m.roughness;
+      mu.NormalStr.value = m.normalStrength;
+      mu.Spec.value      = m.specular;
+    }
+  }
+
+  // Push values back into the DOM sliders so the UI matches
+  syncSlidersFromState();
+
+  // The layer stack may have changed materials/count — regenerate shader.
+  rebuildMaterial();
+  renderLayerPanel();
+  renderMaterialsPanel();
+
+  // Restore embedded assets. Heightmap load re-runs rebuildGeometry itself
+  // (to match the image aspect). If there's no embedded heightmap, go back
+  // to procedural mode and rebuild with the current worldSize.
+  if (cfg.assets && cfg.assets.heightmap) {
+    loadHeightmapFromURL(cfg.assets.heightmap, { silent: true });
+  } else {
+    clearHeightmap();
+  }
+  if (cfg.assets && cfg.assets.skybox) {
+    loadSkyboxFromURL(cfg.assets.skybox, { silent: true });
+  }
+}
+
+function syncSlidersFromState() {
+  const u = sharedUniforms;
+  const set = (id, v) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = v;
+    if (el._valSpan && el._valFmt) el._valSpan.textContent = el._valFmt(parseFloat(v));
+  };
+  set('texScale',        u.uTexScale.value);
+  set('blendSharp',      u.uBlendSharpness.value);
+  set('fogDensity',      u.uFogDensity.value);
+  set('displacement',    u.uDisplacement.value);
+  set('heightScale',     u.uHeightScale.value);
+  set('worldSize',       STATE.worldSize);
+  set('ambientStrength', u.uAmbientStrength.value);
+  set('sunStrength',     u.uSunStrength.value);
+  set('rimStrength',     u.uRimStrength.value);
+  set('specular',        u.uSpecular.value);
+  set('sunX',            u.uSunDir.value.x);
+  set('sunY',            u.uSunDir.value.y);
+  set('sunZ',            u.uSunDir.value.z);
+  set('shadowBias',       u.uShadowBias.value);
+  set('shadowNormalBias', u.uShadowNormalBias.value);
+  set('shadowSoftness',   u.uShadowSoftness.value);
+  set('shadowEnabled',    u.uShadowEnabled.value);
+  set('topoEnabled',   u.uTopoEnabled.value);
+  set('topoSpacing',   u.uTopoSpacing.value);
+  set('topoWidth',     u.uTopoWidth.value);
+  set('topoDepth',     u.uTopoDepth.value);
+  set('topoDarken',    u.uTopoDarken.value);
+  set('topoSlopeMin',  u.uTopoRange.value.x);
+  set('topoSlopeMax',  u.uTopoRange.value.y);
+  set('topoHeightMin', u.uTopoRange.value.z);
+  set('topoHeightMax', u.uTopoRange.value.w);
+  set('waterEnabled',    STATE.water.enabled ? 1 : 0);
+  set('waterHeight',     STATE.water.height);
+  set('waterDistortion', STATE.water.distortionScale);
+  set('waterSize',       STATE.water.sizeMultiplier);
+  set('waterAlpha',      STATE.water.alpha);
+  set('waterFlow',       STATE.water.flowSpeed);
+  const wc = document.getElementById('waterColor');
+  if (wc) wc.value = STATE.water.color;
+  const wsc = document.getElementById('waterSunColor');
+  if (wsc) wsc.value = STATE.water.sunColor;
+}
+
+function saveConfigToFile() {
+  const cfg = collectConfig();
+  const json = JSON.stringify(cfg, null, 2);
+  // Persist to localStorage for auto-restore on reload
+  try { localStorage.setItem(CONFIG_LS_KEY, json); } catch (_) {}
+
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `triplanar-config-${Date.now()}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function loadConfigFromFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const cfg = JSON.parse(reader.result);
+      applyConfig(cfg);
+      try { localStorage.setItem(CONFIG_LS_KEY, reader.result); } catch (_) {}
+    } catch (err) {
+      console.error('Failed to parse config file:', err);
+    }
+  };
+  reader.readAsText(file);
+}
+
+document.getElementById('btn-save-config').addEventListener('click', saveConfigToFile);
+document.getElementById('btn-load-config').addEventListener('click', () => {
+  document.getElementById('configFile').click();
+});
+document.getElementById('configFile').addEventListener('change', e => {
+  if (e.target.files && e.target.files[0]) loadConfigFromFile(e.target.files[0]);
+});
+
+// Auto-restore moved below Materials panel init to avoid TDZ on layerList/matList.
+
+// ═══════════════════════════════════════════════════════════════════════
+//  LAYER PANEL UI
+// ═══════════════════════════════════════════════════════════════════════
+const layerList = document.getElementById('layer-list');
+
+function materialOptionsHTML(selectedId) {
+  return Object.entries(MATERIAL_LIBRARY).map(
+    ([id, m]) => `<option value="${id}"${id === selectedId ? ' selected' : ''}>${m.label}</option>`
+  ).join('');
+}
+
+// Backfill optional fields on layers that may have been created before a
+// given feature existed (saved configs, initial literals, etc). Keeps the
+// renderer and UI code free of endless `?? default` ladders.
+function ensureLayerDefaults(layer) {
+  if (layer.visible == null)         layer.visible = true;
+  if (layer.thickness == null)       layer.thickness = 0.0;
+  if (layer.shadowStrength == null)  layer.shadowStrength = 0.0;
+  if (layer.shadowDist == null)      layer.shadowDist = 0.3;
+  if (layer.shadowBlur == null)      layer.shadowBlur = 0.15;
+  if (!layer.edgeNoise) {
+    layer.edgeNoise = {
+      enabled: 0,
+      scale: -1.0,   // log10 of the world-XZ frequency (so 10^-1 = 0.1 ≈ medium)
+      amount: 0.08,  // how far the edge is pushed (in h / slp units)
+      width: 0.15,   // radius of the noise zone around each toggled edge
+      maskHMin: 0,
+      maskHMax: 0,
+      maskSMin: 0,
+      maskSMax: 0
+    };
+  }
+  // Backfill: older saves used scale as raw frequency + soft instead of width.
+  if (layer.edgeNoise) {
+    if (layer.edgeNoise.scale != null && layer.edgeNoise.scale > 0 && layer.edgeNoise.scale < 1) {
+      // Heuristic: anything in (0,1) is almost certainly the old linear scale —
+      // convert to log10 so old configs still feel roughly right.
+      layer.edgeNoise.scale = Math.log10(layer.edgeNoise.scale);
+    }
+    if (layer.edgeNoise.width == null) {
+      layer.edgeNoise.width = layer.edgeNoise.soft != null ? Math.max(layer.edgeNoise.soft * 2, 0.05) : 0.15;
+    }
+    if (layer.edgeNoise.maskHMin == null) layer.edgeNoise.maskHMin = 0;
+    if (layer.edgeNoise.maskHMax == null) layer.edgeNoise.maskHMax = 0;
+    if (layer.edgeNoise.maskSMin == null) layer.edgeNoise.maskSMin = 0;
+    if (layer.edgeNoise.maskSMax == null) layer.edgeNoise.maskSMax = 0;
+  }
+  if (!layer.gradient) {
+    layer.gradient = {
+      enabled: 0,
+      strength: 1.0,
+      stops: [
+        { pos: 0.0, color: [1, 1, 1] },
+        { pos: 1.0, color: [1, 1, 1] }
+      ]
+    };
+  }
+  if (!layer.slopeGradient) {
+    layer.slopeGradient = {
+      enabled: 0,
+      strength: 1.0,
+      stops: [
+        { pos: 0.0, color: [1, 1, 1] },
+        { pos: 1.0, color: [1, 1, 1] }
+      ]
+    };
+  }
+  return layer;
+}
+
+// Convert [r,g,b] in 0..1 to "#rrggbb" for <input type="color">.
+function rgbToHex(c) {
+  const to = v => Math.max(0, Math.min(255, Math.round(v * 255)))
+    .toString(16).padStart(2, '0');
+  return `#${to(c[0])}${to(c[1])}${to(c[2])}`;
+}
+function hexToRgb(hex) {
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  if (!m) return [1, 1, 1];
+  return [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255];
+}
+
+// Generate the CSS linear-gradient string used for the preview bar.
+function gradientCssFromStops(stops) {
+  if (!stops || stops.length === 0) return '#000';
+  const sorted = [...stops].sort((a, b) => a.pos - b.pos);
+  const parts = sorted.map(s => `${rgbToHex(s.color)} ${(s.pos * 100).toFixed(1)}%`);
+  return `linear-gradient(to right, ${parts.join(', ')})`;
+}
+
+function renderLayerPanel() {
+  STATE.layers.forEach(ensureLayerDefaults);
+  layerList.innerHTML = '';
+
+  // Base layer
+  const baseCard = document.createElement('div');
+  baseCard.className = 'layer-card base';
+  baseCard.innerHTML = `
+    <div class="layer-head">
+      <span class="layer-tag">Base</span>
+    </div>
+    <select data-role="base-material">${materialOptionsHTML(STATE.baseLayer.material)}</select>
+    <div class="layer-slider">
+      <label>Brightness</label>
+      <input type="range" min="0" max="2" step="0.01" value="${STATE.baseLayer.brightness}" data-k="brightness">
+      <span class="val">${STATE.baseLayer.brightness.toFixed(2)}</span>
+    </div>
+  `;
+  layerList.appendChild(baseCard);
+  baseCard.querySelector('select').addEventListener('change', e => {
+    STATE.baseLayer.material = e.target.value;
+    rebuildMaterial();
+  });
+  baseCard.querySelector('input[type="range"]').addEventListener('input', e => {
+    const v = parseFloat(e.target.value);
+    STATE.baseLayer.brightness = v;
+    e.target.parentElement.querySelector('.val').textContent = v.toFixed(2);
+    currentMat.uniforms.uBaseBrightness.value = v;
+  });
+
+  // Auto layers
+  STATE.layers.forEach((layer, idx) => {
+    const card = document.createElement('div');
+    card.className = 'layer-card' + (layer.visible === false ? ' hidden-layer' : '');
+    card.innerHTML = `
+      <div class="layer-head">
+        <span class="layer-tag">Auto ${idx + 1}</span>
+        <div>
+          <button class="layer-vis ${layer.visible === false ? 'off' : ''}" title="Toggle visibility">${layer.visible === false ? 'OFF' : 'ON'}</button>
+          <button class="layer-del" title="Remove layer">✕</button>
+        </div>
+      </div>
+      <select>${materialOptionsHTML(layer.material)}</select>
+      <div class="layer-slider">
+        <label>H min</label>
+        <input type="range" min="0" max="1" step="0.01" value="${layer.hMin}" data-k="hMin">
+        <span class="val">${layer.hMin.toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>H max</label>
+        <input type="range" min="0" max="1" step="0.01" value="${layer.hMax}" data-k="hMax">
+        <span class="val">${layer.hMax.toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>Slope min</label>
+        <input type="range" min="0" max="1" step="0.01" value="${layer.sMin}" data-k="sMin">
+        <span class="val">${layer.sMin.toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>Slope max</label>
+        <input type="range" min="0" max="1" step="0.01" value="${layer.sMax}" data-k="sMax">
+        <span class="val">${layer.sMax.toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>Softness</label>
+        <input type="range" min="0.01" max="0.4" step="0.01" value="${layer.soft}" data-k="soft">
+        <span class="val">${layer.soft.toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>Strength</label>
+        <input type="range" min="0" max="1" step="0.01" value="${layer.strength}" data-k="strength">
+        <span class="val">${layer.strength.toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>Brightness</label>
+        <input type="range" min="0" max="2" step="0.01" value="${layer.brightness}" data-k="brightness">
+        <span class="val">${layer.brightness.toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>Thickness</label>
+        <input type="range" min="0" max="2" step="0.01" value="${layer.thickness ?? 0}" data-k="thickness">
+        <span class="val">${(layer.thickness ?? 0).toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>Drop shadow</label>
+        <input type="range" min="0" max="1" step="0.01" value="${layer.shadowStrength ?? 0}" data-k="shadowStrength">
+        <span class="val">${(layer.shadowStrength ?? 0).toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>Shadow dist</label>
+        <input type="range" min="0.01" max="1" step="0.01" value="${layer.shadowDist ?? 0.3}" data-k="shadowDist">
+        <span class="val">${(layer.shadowDist ?? 0.3).toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>Shadow blur</label>
+        <input type="range" min="0.01" max="1" step="0.01" value="${layer.shadowBlur ?? 0.15}" data-k="shadowBlur">
+        <span class="val">${(layer.shadowBlur ?? 0.15).toFixed(2)}</span>
+      </div>
+      <div class="gradient-editor" data-edge-noise-editor>
+        <div class="gradient-head">
+          <input type="checkbox" data-edge-enabled ${layer.edgeNoise.enabled ? 'checked' : ''}>
+          <label>Edge noise</label>
+        </div>
+        <div class="edge-mask-row">
+          <label><input type="checkbox" data-edge-mask="HMin" ${layer.edgeNoise.maskHMin ? 'checked' : ''}> H min</label>
+          <label><input type="checkbox" data-edge-mask="HMax" ${layer.edgeNoise.maskHMax ? 'checked' : ''}> H max</label>
+          <label><input type="checkbox" data-edge-mask="SMin" ${layer.edgeNoise.maskSMin ? 'checked' : ''}> S min</label>
+          <label><input type="checkbox" data-edge-mask="SMax" ${layer.edgeNoise.maskSMax ? 'checked' : ''}> S max</label>
+        </div>
+        <div class="layer-slider">
+          <label>Scale</label>
+          <input type="range" min="-3" max="2" step="0.01" value="${layer.edgeNoise.scale}" data-edge-scale>
+          <span class="val">${Math.pow(10, layer.edgeNoise.scale).toPrecision(2)}</span>
+        </div>
+        <div class="layer-slider">
+          <label>Amount</label>
+          <input type="range" min="0" max="0.5" step="0.005" value="${layer.edgeNoise.amount}" data-edge-amount>
+          <span class="val">${layer.edgeNoise.amount.toFixed(2)}</span>
+        </div>
+        <div class="layer-slider">
+          <label>Width</label>
+          <input type="range" min="0.005" max="0.6" step="0.005" value="${layer.edgeNoise.width}" data-edge-width>
+          <span class="val">${layer.edgeNoise.width.toFixed(2)}</span>
+        </div>
+      </div>
+      <div class="gradient-editor" data-gradient-editor>
+        <div class="gradient-head">
+          <input type="checkbox" data-grad-enabled ${layer.gradient.enabled ? 'checked' : ''}>
+          <label>Height tint</label>
+        </div>
+        <div class="layer-slider">
+          <label>Strength</label>
+          <input type="range" min="0" max="1" step="0.01" value="${layer.gradient.strength}" data-grad-strength>
+          <span class="val">${layer.gradient.strength.toFixed(2)}</span>
+        </div>
+        <div class="gradient-bar" data-grad-bar></div>
+        <div data-grad-stops></div>
+        <button class="gradient-add-stop" data-grad-add>+ Add stop</button>
+      </div>
+      <div class="gradient-editor" data-slope-gradient-editor>
+        <div class="gradient-head">
+          <input type="checkbox" data-sgrad-enabled ${layer.slopeGradient.enabled ? 'checked' : ''}>
+          <label>Slope tint</label>
+        </div>
+        <div class="layer-slider">
+          <label>Strength</label>
+          <input type="range" min="0" max="1" step="0.01" value="${layer.slopeGradient.strength}" data-sgrad-strength>
+          <span class="val">${layer.slopeGradient.strength.toFixed(2)}</span>
+        </div>
+        <div class="gradient-bar" data-sgrad-bar></div>
+        <div data-sgrad-stops></div>
+        <button class="gradient-add-stop" data-sgrad-add>+ Add stop</button>
+      </div>
+    `;
+    layerList.appendChild(card);
+
+    // Material change → rebuild shader
+    card.querySelector('select').addEventListener('change', e => {
+      layer.material = e.target.value;
+      rebuildMaterial();
+    });
+
+    // Visibility toggle → flip layer.visible and zero the strength uniform
+    // when off. Live-updated, no shader rebuild — the layer block stays
+    // compiled in but its weight collapses to 0 so it costs the same as a
+    // zero-strength layer (the early-out `w > 0.01` skip path).
+    const visBtn = card.querySelector('.layer-vis');
+    visBtn.addEventListener('click', () => {
+      layer.visible = !(layer.visible !== false);
+      visBtn.classList.toggle('off', layer.visible === false);
+      visBtn.textContent = layer.visible === false ? 'OFF' : 'ON';
+      card.classList.toggle('hidden-layer', layer.visible === false);
+      currentMat.uniforms[`strengthLayer${idx}`].value =
+        layer.visible === false ? 0.0 : layer.strength;
+    });
+
+    // Delete button → remove layer + rebuild shader
+    card.querySelector('.layer-del').addEventListener('click', () => {
+      STATE.layers.splice(idx, 1);
+      rebuildMaterial();
+      renderLayerPanel();
+    });
+
+    // Sliders: update STATE + uniforms live (no shader rebuild needed).
+    // Gradient controls live inside .gradient-editor and are wired separately
+    // — we exclude them here so the layer-mask fallback branch doesn't fire.
+    card.querySelectorAll('.layer-slider > input[type="range"][data-k]').forEach(input => {
+      input.addEventListener('input', e => {
+        const key = e.target.dataset.k;
+        const val = parseFloat(e.target.value);
+        layer[key] = val;
+        e.target.parentElement.querySelector('.val').textContent = val.toFixed(2);
+        // Push live to uniform
+        const u = currentMat.uniforms;
+        if (key === 'soft')              u[`softLayer${idx}`].value = val;
+        else if (key === 'strength')     u[`strengthLayer${idx}`].value = layer.visible === false ? 0.0 : val;
+        else if (key === 'brightness')   u[`brightLayer${idx}`].value = val;
+        else if (key === 'thickness')    u[`thickLayer${idx}`].value = val;
+        else if (key === 'shadowStrength') u[`shadowLayer${idx}`].value = val;
+        else if (key === 'shadowDist')   u[`shadowDistLayer${idx}`].value = val;
+        else if (key === 'shadowBlur')   u[`shadowBlurLayer${idx}`].value = val;
+        else {
+          u[`uLayer${idx}`].value.set(layer.hMin, layer.hMax, layer.sMin, layer.sMax);
+        }
+      });
+    });
+
+    // Edge-noise editor wiring. All live-updated uniforms — no shader
+    // rebuild needed. Scale slider value is the log10 exponent; the readout
+    // shows the linearized frequency for legibility.
+    const edgeEditor  = card.querySelector('[data-edge-noise-editor]');
+    const edgeEnable  = edgeEditor.querySelector('[data-edge-enabled]');
+    const edgeScale   = edgeEditor.querySelector('[data-edge-scale]');
+    const edgeAmount  = edgeEditor.querySelector('[data-edge-amount]');
+    const edgeWidth   = edgeEditor.querySelector('[data-edge-width]');
+
+    edgeEnable.addEventListener('change', () => {
+      layer.edgeNoise.enabled = edgeEnable.checked ? 1 : 0;
+      currentMat.uniforms[`edgeNoiseEnabledLayer${idx}`].value = layer.edgeNoise.enabled;
+    });
+
+    edgeEditor.querySelectorAll('[data-edge-mask]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const which = cb.dataset.edgeMask; // HMin / HMax / SMin / SMax
+        layer.edgeNoise[`mask${which}`] = cb.checked ? 1 : 0;
+        currentMat.uniforms[`edgeMask${which}Layer${idx}`].value = cb.checked ? 1.0 : 0.0;
+      });
+    });
+
+    edgeScale.addEventListener('input', () => {
+      const v = parseFloat(edgeScale.value);
+      layer.edgeNoise.scale = v;
+      edgeScale.parentElement.querySelector('.val').textContent = Math.pow(10, v).toPrecision(2);
+      currentMat.uniforms[`edgeNoiseScaleLayer${idx}`].value = v;
+    });
+    edgeAmount.addEventListener('input', () => {
+      const v = parseFloat(edgeAmount.value);
+      layer.edgeNoise.amount = v;
+      edgeAmount.parentElement.querySelector('.val').textContent = v.toFixed(2);
+      currentMat.uniforms[`edgeNoiseAmountLayer${idx}`].value = v;
+    });
+    edgeWidth.addEventListener('input', () => {
+      const v = parseFloat(edgeWidth.value);
+      layer.edgeNoise.width = v;
+      edgeWidth.parentElement.querySelector('.val').textContent = v.toFixed(2);
+      currentMat.uniforms[`edgeNoiseWidthLayer${idx}`].value = v;
+    });
+
+    // Gradient editor wiring. Generic — used for both the height-tint and
+    // slope-tint editors. The selectors arg names the data-* attribute prefix
+    // so a single function can find both editors' DOM hooks.
+    function wireGradientEditor({ editorSel, barSel, stopsSel, addSel, enableSel, strengthSel, gradKey, kind }) {
+      const editor   = card.querySelector(`[${editorSel}]`);
+      const bar      = editor.querySelector(`[${barSel}]`);
+      const stopsCt  = editor.querySelector(`[${stopsSel}]`);
+      const addBtn   = editor.querySelector(`[${addSel}]`);
+      const enableCb = editor.querySelector(`[${enableSel}]`);
+      const strInp   = editor.querySelector(`[${strengthSel}]`);
+
+      function refresh() {
+        bar.style.background = gradientCssFromStops(layer[gradKey].stops);
+        stopsCt.innerHTML = '';
+        layer[gradKey].stops.forEach((stop, si) => {
+          const row = document.createElement('div');
+          row.className = 'gradient-stop-row';
+          row.innerHTML = `
+            <input type="color" value="${rgbToHex(stop.color)}">
+            <input type="range" min="0" max="1" step="0.001" value="${stop.pos}">
+            <span class="val">${stop.pos.toFixed(2)}</span>
+            <button class="stop-del" title="Remove stop">✕</button>
+          `;
+          const colorInp = row.querySelector('input[type="color"]');
+          const posInp   = row.querySelector('input[type="range"]');
+          const posVal   = row.querySelector('.val');
+          const delBtn   = row.querySelector('.stop-del');
+          colorInp.addEventListener('input', () => {
+            stop.color = hexToRgb(colorInp.value);
+            bar.style.background = gradientCssFromStops(layer[gradKey].stops);
+            pushGradientUniforms(idx, kind);
+          });
+          posInp.addEventListener('input', () => {
+            stop.pos = parseFloat(posInp.value);
+            posVal.textContent = stop.pos.toFixed(2);
+            bar.style.background = gradientCssFromStops(layer[gradKey].stops);
+            pushGradientUniforms(idx, kind);
+          });
+          delBtn.addEventListener('click', () => {
+            if (layer[gradKey].stops.length <= 2) return;
+            layer[gradKey].stops.splice(si, 1);
+            refresh();
+            pushGradientUniforms(idx, kind);
+          });
+          stopsCt.appendChild(row);
+        });
+        addBtn.disabled = layer[gradKey].stops.length >= 8;
+      }
+
+      enableCb.addEventListener('change', () => {
+        layer[gradKey].enabled = enableCb.checked ? 1 : 0;
+        pushGradientUniforms(idx, kind);
+      });
+      strInp.addEventListener('input', () => {
+        const v = parseFloat(strInp.value);
+        layer[gradKey].strength = v;
+        strInp.parentElement.querySelector('.val').textContent = v.toFixed(2);
+        pushGradientUniforms(idx, kind);
+      });
+      addBtn.addEventListener('click', () => {
+        if (layer[gradKey].stops.length >= 8) return;
+        // Insert a new stop at the midpoint of the largest gap between existing
+        // stops, picking a color that interpolates between its neighbours — this
+        // matches how Photoshop adds stops (appears where you'd expect, no jump).
+        const sorted = [...layer[gradKey].stops].sort((a, b) => a.pos - b.pos);
+        let bestGap = 0, bestPos = 0.5, left = sorted[0], right = sorted[sorted.length - 1];
+        for (let i = 0; i < sorted.length - 1; i++) {
+          const gap = sorted[i + 1].pos - sorted[i].pos;
+          if (gap > bestGap) { bestGap = gap; bestPos = (sorted[i].pos + sorted[i + 1].pos) * 0.5; left = sorted[i]; right = sorted[i + 1]; }
+        }
+        const t = (bestPos - left.pos) / Math.max(right.pos - left.pos, 1e-5);
+        const color = [
+          left.color[0] + (right.color[0] - left.color[0]) * t,
+          left.color[1] + (right.color[1] - left.color[1]) * t,
+          left.color[2] + (right.color[2] - left.color[2]) * t
+        ];
+        layer[gradKey].stops.push({ pos: bestPos, color });
+        refresh();
+        pushGradientUniforms(idx, kind);
+      });
+
+      refresh();
+    }
+
+    wireGradientEditor({
+      editorSel: 'data-gradient-editor',
+      barSel:    'data-grad-bar',
+      stopsSel:  'data-grad-stops',
+      addSel:    'data-grad-add',
+      enableSel: 'data-grad-enabled',
+      strengthSel: 'data-grad-strength',
+      gradKey:   'gradient',
+      kind:      'height'
+    });
+    wireGradientEditor({
+      editorSel: 'data-slope-gradient-editor',
+      barSel:    'data-sgrad-bar',
+      stopsSel:  'data-sgrad-stops',
+      addSel:    'data-sgrad-add',
+      enableSel: 'data-sgrad-enabled',
+      strengthSel: 'data-sgrad-strength',
+      gradKey:   'slopeGradient',
+      kind:      'slope'
+    });
+  });
+}
+
+function addAutoLayer() {
+  if (STATE.layers.length >= MAX_LAYERS) return;
+  STATE.layers.push({
+    id: STATE.nextLayerId++,
+    material: 'grass',
+    hMin: 0.0, hMax: 1.0, sMin: 0.0, sMax: 1.0,
+    soft: 0.1, strength: 1.0, brightness: 1.0,
+    thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.3, shadowBlur: 0.15,
+    edgeNoise: {
+      enabled: 0, scale: -1.0, amount: 0.08, width: 0.15,
+      maskHMin: 0, maskHMax: 0, maskSMin: 0, maskSMax: 0
+    },
+    gradient: {
+      enabled: 0,
+      strength: 1.0,
+      stops: [
+        { pos: 0.0, color: [1, 1, 1] },
+        { pos: 1.0, color: [1, 1, 1] }
+      ]
+    },
+    slopeGradient: {
+      enabled: 0,
+      strength: 1.0,
+      stops: [
+        { pos: 0.0, color: [1, 1, 1] },
+        { pos: 1.0, color: [1, 1, 1] }
+      ]
+    }
+  });
+  rebuildMaterial();
+  renderLayerPanel();
+}
+document.getElementById('btn-add-layer').addEventListener('click', addAutoLayer);
+
+document.getElementById('btn-biplanar').addEventListener('click', () => {
+  STATE.biplanar = !STATE.biplanar;
+  document.getElementById('btn-biplanar').textContent =
+    `BIPLANAR: ${STATE.biplanar ? 'ON' : 'OFF'}`;
+  rebuildMaterial();
+});
+renderLayerPanel();
+
+// ═══════════════════════════════════════════════════════════════════════
+//  MATERIALS PANEL — per-material tunables with texture preview
+// ═══════════════════════════════════════════════════════════════════════
+// Each card shows the color map as a thumbnail and exposes:
+//   tint (color picker), brightness, rough mult, normal strength,
+//   specular, uv scale, uv rotation
+// All writes go straight to the material's shared uniforms so the change
+// is live without a shader rebuild.
+const matList = document.getElementById('mat-list');
+
+function rgbToHex(rgb) {
+  const clamp = v => Math.max(0, Math.min(255, Math.round(v * 255)));
+  const toHex = v => clamp(v).toString(16).padStart(2, '0');
+  return '#' + toHex(rgb[0]) + toHex(rgb[1]) + toHex(rgb[2]);
+}
+function hexToRgb(hex) {
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  if (!m) return [1, 1, 1];
+  return [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255];
+}
+
+function ensureMatUniforms(id) {
+  // Creates the shared _uniforms object if it doesn't exist yet. Needed for
+  // materials that haven't been referenced by any layer and so haven't been
+  // through buildUniformsForState yet.
+  const m = MATERIAL_LIBRARY[id];
+  if (m._uniforms) return m._uniforms;
+  m._uniforms = {
+    UvScale:    { value: m.uvScale },
+    UvRot:      { value: m.uvRotation },
+    Bright:     { value: m.brightness },
+    Tint:       { value: new THREE.Vector3(...m.tint) },
+    Roughness:  { value: m.roughness },
+    NormalStr:  { value: m.normalStrength },
+    Spec:       { value: m.specular }
+  };
+  return m._uniforms;
+}
+
+function renderMaterialsPanel() {
+  matList.innerHTML = '';
+  for (const [id, m] of Object.entries(MATERIAL_LIBRARY)) {
+    ensureMatUniforms(id);
+    const card = document.createElement('div');
+    card.className = 'mat-card';
+    const tintHex = rgbToHex(m.tint);
+    card.innerHTML = `
+      <div class="mat-head">
+        <div class="mat-preview" style="background-image:url('${m.color}')"></div>
+        <div>
+          <div class="mat-title">${m.label}</div>
+          <div class="mat-sub">${id}</div>
+        </div>
+      </div>
+      <div class="layer-slider">
+        <label>Tint</label>
+        <input type="color" data-k="tint" value="${tintHex}">
+      </div>
+      <div class="layer-slider">
+        <label>Bright</label>
+        <input type="range" min="0" max="2" step="0.01" value="${m.brightness}" data-k="brightness">
+        <span class="val">${m.brightness.toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>Roughness</label>
+        <input type="range" min="0" max="1" step="0.01" value="${m.roughness}" data-k="roughness">
+        <span class="val">${m.roughness.toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>Normal str</label>
+        <input type="range" min="0" max="2" step="0.01" value="${m.normalStrength}" data-k="normalStrength">
+        <span class="val">${m.normalStrength.toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>Specular</label>
+        <input type="range" min="0" max="3" step="0.01" value="${m.specular}" data-k="specular">
+        <span class="val">${m.specular.toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>UV scale</label>
+        <input type="range" min="0.1" max="5" step="0.01" value="${m.uvScale}" data-k="uvScale">
+        <span class="val">${m.uvScale.toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>UV rot</label>
+        <input type="range" min="0" max="6.2832" step="0.01" value="${m.uvRotation}" data-k="uvRotation">
+        <span class="val">${m.uvRotation.toFixed(2)}</span>
+      </div>
+    `;
+    matList.appendChild(card);
+
+    // Color picker → tint vec3
+    card.querySelector('input[type="color"]').addEventListener('input', e => {
+      const rgb = hexToRgb(e.target.value);
+      m.tint = rgb;
+      m._uniforms.Tint.value.set(...rgb);
+    });
+
+    // Range sliders → corresponding uniform
+    card.querySelectorAll('input[type="range"]').forEach(input => {
+      input.addEventListener('input', e => {
+        const key = e.target.dataset.k;
+        const val = parseFloat(e.target.value);
+        m[key] = val;
+        e.target.parentElement.querySelector('.val').textContent = val.toFixed(2);
+        const u = m._uniforms;
+        if      (key === 'brightness')     u.Bright.value    = val;
+        else if (key === 'roughness')      u.Roughness.value = val;
+        else if (key === 'normalStrength') u.NormalStr.value = val;
+        else if (key === 'specular')       u.Spec.value      = val;
+        else if (key === 'uvScale')        u.UvScale.value   = val;
+        else if (key === 'uvRotation')     u.UvRot.value     = val;
+      });
+    });
+  }
+}
+renderMaterialsPanel();
+
+const matPanel = document.getElementById('hud-materials');
+const matToggleBtn = document.getElementById('btn-toggle-materials');
+matToggleBtn.addEventListener('click', () => {
+  matPanel.classList.toggle('open');
+  matToggleBtn.classList.toggle('active', matPanel.classList.contains('open'));
+});
+
+// Try to auto-restore the last config from localStorage. Must run after
+// layerList + matList + renderMaterialsPanel are defined (TDZ).
+try {
+  const saved = localStorage.getItem(CONFIG_LS_KEY);
+  if (saved) applyConfig(JSON.parse(saved));
+} catch (err) { console.warn('Auto-restore failed:', err); }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  RENDER LOOP
+// ═══════════════════════════════════════════════════════════════════════
+let lastTime = performance.now();
+let frameCount = 0;
+let fps = 0;
+// Rolling frame-time average so the number doesn't jitter every frame.
+let frameTimeAccum = 0;
+let frameTimeSamples = 0;
+let avgFrameTimeMs = 0;
+
+function animate(now) {
+  requestAnimationFrame(animate);
+
+  frameCount++;
+  if (now - lastTime >= 1000) {
+    fps = frameCount;
+    frameCount = 0;
+    lastTime = now;
+    document.getElementById('stat-fps').textContent = `FPS: ${fps}`;
+    if (frameTimeSamples > 0) {
+      avgFrameTimeMs = frameTimeAccum / frameTimeSamples;
+      frameTimeAccum = 0;
+      frameTimeSamples = 0;
+      document.getElementById('stat-frametime').textContent =
+        `FRAME: ${avgFrameTimeMs.toFixed(2)} ms`;
+    }
+    // Derived throughput: pixels on screen × taps/pixel = texels/frame.
+    // This is the headline "how expensive is my shader" number.
+    const w = renderer.domElement.width;
+    const h = renderer.domElement.height;
+    // Only terrain pixels actually run the heavy shader, but without a
+    // depth pre-pass we treat the whole framebuffer as worst-case.
+    const pixels = w * h;
+    const texelsPerFrame = pixels * shaderStats.tapsPerPixel;
+    document.getElementById('stat-pixels').textContent =
+      `PIXELS: ${formatNum(pixels)} (${w}x${h})`;
+    document.getElementById('stat-texels').textContent =
+      `TEXELS/FR: ${formatNum(texelsPerFrame)}`;
+    // Draw-call count straight from three.js
+    const info = renderer.info.render;
+    document.getElementById('stat-drawcalls').textContent =
+      `DRAWS: ${info.calls}`;
+  }
+
+  sharedUniforms.uTime.value = now * 0.001;
+
+  // Keep the sun pointing from uSunDir, scaled to sit outside the terrain.
+  const sd = sharedUniforms.uSunDir.value;
+  sunLight.position.set(sd.x * 60, sd.y * 60, sd.z * 60);
+  sunLight.target.position.set(0, 0, 0);
+  sunLight.target.updateMatrixWorld();
+
+  // Advance the water shader time for animated ripples, and keep its sun
+  // direction in sync with the global sun so the specular highlight matches
+  // the terrain shading.
+  if (water && water.visible) {
+    water.material.uniforms.time.value += STATE.water.flowSpeed;
+    if (water.material.uniforms.sunDirection) {
+      water.material.uniforms.sunDirection.value.copy(sd).normalize();
+    }
+  }
+
+  // Measure just the render call so we know the GPU-bound frame cost
+  // (not the requestAnimationFrame idle time).
+  const tStart = performance.now();
+  renderer.render(scene, camera);
+  frameTimeAccum += performance.now() - tStart;
+  frameTimeSamples++;
+}
+
+// Sync shadow uniforms right before the terrain draws (after the shadow pass
+// has already built the shadow map and updated sunLight.shadow.matrix).
+terrain.onBeforeRender = function() {
+  if (sunLight.shadow && sunLight.shadow.map) {
+    sharedUniforms.uShadowMap.value = sunLight.shadow.map.texture;
+    sharedUniforms.uShadowMatrix.value.copy(sunLight.shadow.matrix);
+  }
+};
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+animate(performance.now());
+</script>
+</body>
+</html>
