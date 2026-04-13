@@ -700,6 +700,10 @@
       <label>World Size</label>
       <input type="range" id="worldSize" min="6" max="40" step="0.5" value="18">
     </div>
+    <div class="control-row">
+      <label>FOV</label>
+      <input type="range" id="cameraFov" min="10" max="90" step="1" value="40">
+    </div>
     <div class="preset-btns">
       <button class="preset-btn" id="btn-load-heightmap">Load Heightmap</button>
       <button class="preset-btn" id="btn-clear-heightmap">Procedural</button>
@@ -736,11 +740,11 @@
     </div>
     <div class="control-row">
       <label>Height min</label>
-      <input type="range" id="topoHeightMin" min="0" max="1" step="0.01" value="0">
+      <input type="range" id="topoHeightMin" min="-0.25" max="1.25" step="0.01" value="0">
     </div>
     <div class="control-row">
       <label>Height max</label>
-      <input type="range" id="topoHeightMax" min="0" max="1" step="0.01" value="1">
+      <input type="range" id="topoHeightMax" min="-0.25" max="1.25" step="0.01" value="1">
     </div>
 
     <div class="group-title">Water</div>
@@ -910,10 +914,10 @@ const STATE = {
   layers: [
     // id, material, height range, slope range, softness, strength, brightness,
     // thickness (fake ledge height, world units, 0 = flat), shadowStrength (drop shadow darkness 0..1)
-    { id: 1, material: 'sand',  hMin: 0.00, hMax: 0.20, sMin: 0.00, sMax: 1.00, soft: 0.10, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.3, shadowBlur: 0.15 },
-    { id: 2, material: 'grass', hMin: 0.10, hMax: 0.70, sMin: 0.00, sMax: 0.40, soft: 0.15, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.3, shadowBlur: 0.15 },
-    { id: 3, material: 'cliff', hMin: 0.00, hMax: 1.00, sMin: 0.45, sMax: 1.00, soft: 0.15, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.3, shadowBlur: 0.15 },
-    { id: 4, material: 'snow',  hMin: 0.75, hMax: 1.00, sMin: 0.00, sMax: 0.35, soft: 0.10, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.3, shadowBlur: 0.15 }
+    { id: 1, material: 'sand',  hMin: 0.00, hMax: 0.20, sMin: 0.00, sMax: 1.00, soft: 0.10, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.02, shadowBlur: 0.01},
+    { id: 3, material: 'cliff', hMin: 0.00, hMax: 1.00, sMin: 0.45, sMax: 1.00, soft: 0.15, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.02, shadowBlur: 0.01},
+    { id: 2, material: 'grass', hMin: 0.10, hMax: 0.70, sMin: 0.00, sMax: 0.40, soft: 0.15, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.02, shadowBlur: 0.01},
+    { id: 4, material: 'snow',  hMin: 0.75, hMax: 1.00, sMin: 0.00, sMax: 0.35, soft: 0.10, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.02, shadowBlur: 0.01}
   ],
   nextLayerId: 5,
   biplanar: false,        // use biplanar projection instead of triplanar (2 taps per texture instead of 3)
@@ -1228,106 +1232,78 @@ function buildFragmentShader(state) {
                * (1.0 - smoothstep(sMaxEdge, sMaxEdge + softLayer${idx}, slp));
       float w = hM * sM * strengthLayer${idx};
 
-      // ── Fake ledge / drop shadow (linked to sun) ──
-      // Treats this layer as a thin sheet sitting on top of what's below.
-      // Uses screen-space derivatives of w to reconstruct a world-XZ gradient:
-      // dw/dX = dFdx(w) / dFdx(worldX), etc. That gradient vector points
-      // toward the grass-side of the edge in world coordinates. Comparing it
-      // with the horizontal sun direction tells us which side of the edge
-      // should receive a drop shadow and which gets the lit ledge lip.
-      if (thickLayer${idx} > 0.0001 || shadowLayer${idx} > 0.0001) {
+      // ── Drop shadow on the UNDERLYING layer, just outside this layer ──
+      // Dilate this layer's mask by (shadowDist + shadowBlur) and take the
+      // band that's INSIDE the dilated mask but OUTSIDE this layer's own
+      // soft-edge zone. The result darkens whatever was already painted in
+      // 'albedo' (sand/rock from earlier layers) in a strip just past the
+      // grass edge — so the grass itself stays bright and the rock right
+      // next to it looks recessed underneath the grass.
+      float dropAmt = 0.0;
+      if (shadowLayer${idx} > 0.0001) {
+        float sD = max(shadowDistLayer${idx}, 0.001);
+        float sB = max(shadowBlurLayer${idx}, 0.001);
+        float dilate = sD + sB;
+        float outerSoft = softLayer${idx} + dilate;
+        // Wider mask: same h/slp criteria but pulled OUTWARD by 'dilate'.
+        float hMout = smoothstep(hMinEdge - outerSoft, hMinEdge, h)
+                    * (1.0 - smoothstep(hMaxEdge, hMaxEdge + outerSoft, h));
+        float sMout = smoothstep(sMinEdge - outerSoft, sMinEdge, slp)
+                    * (1.0 - smoothstep(sMaxEdge, sMaxEdge + outerSoft, slp));
+        float wOuter = hMout * sMout * strengthLayer${idx};
+        // Darken the full dilated band on albedo. Where this layer is
+        // opaque, the later mix(albedo, la, w) hides it; where the layer
+        // is semi-transparent (soft edge) the shadow shows through under it.
+        float band = clamp(wOuter, 0.0, 1.0);
+        dropAmt = band * shadowLayer${idx};
+        albedo *= (1.0 - dropAmt * 0.85);
+      }
+
+      // ── Highlight band INSIDE the layer edge, on the sun-facing side ──
+      // We need a true world-XZ distance to the edge so the band width
+      // is in real units. Use derivatives of w to reconstruct the gradient
+      // and project (w - 0.5) along it.
+      float lipBoost = 1.0;
+      if (thickLayer${idx} > 0.0001 && w > 0.001) {
         float dwdx = dFdx(w);
         float dwdy = dFdy(w);
         vec2 dXdx = vec2(dFdx(vWorldPos.x), dFdx(vWorldPos.z));
         vec2 dXdy = vec2(dFdy(vWorldPos.x), dFdy(vWorldPos.z));
-        // Inverse 2x2 to get ∂w/∂worldXZ
         float det = dXdx.x * dXdy.y - dXdx.y * dXdy.x;
-        vec2 gradW = vec2(0.0);
         if (abs(det) > 1e-8) {
-          gradW = vec2(
+          vec2 gradW = vec2(
             ( dXdy.y * dwdx - dXdx.y * dwdy) / det,
             (-dXdy.x * dwdx + dXdx.x * dwdy) / det
           );
-        }
-        float gradLen = length(gradW);
-        if (gradLen > 1e-6) {
-          // gradW points INTO the grass patch (toward higher w). The edge NORMAL
-          // pointing OUT of the grass ledge (the direction a ledge-face would
-          // look) is therefore -gradW. That's the vector to compare with the
-          // sun: when -gradW aligns with sunH the ledge face is lit; when
-          // it points away, the rock behind the ledge is in drop shadow.
-          vec2 edgeDir = -gradW / gradLen;          // outward ledge-face normal
-          vec2 sunH = vec2(uSunDir.x, uSunDir.z);
-          float sunHLen = length(sunH);
-          if (sunHLen > 1e-4) {
-            sunH /= sunHLen;
-            float facing = dot(edgeDir, sunH);      // +1 ledge faces sun, -1 ledge is in shadow
-            // edgeMask gates the effect to actual ledge boundaries (places
-            // where w is changing), rather than the interior of the patch.
-            float edgeMask = smoothstep(0.0, 1.0, gradLen * thickLayer${idx} * 20.0);
-
-            // Lit lip: brighten the grass side (w is high) when the ledge faces sun.
-            float lipAmt = edgeMask * max(facing, 0.0) * w;
-
-            // Drop shadow — driven by distance from the grass edge measured in
-            // layer-mask space. distFromEdge = 0 at the edge, 1 deep in rock.
-            // shadowDistLayer controls how far the shadow reaches into the
-            // rock (as a fraction of the soft falloff region); shadowBlurLayer
-            // controls the softness of the shadow's fading tail.
-            float distFromEdge = 1.0 - w;
-            float sD = max(shadowDistLayer${idx}, 0.001);
-            float sB = max(shadowBlurLayer${idx}, 0.001);
-            float shadowFall = 1.0 - smoothstep(sD - sB * 0.5, sD + sB * 0.5, distFromEdge);
-            // Also fade out the shadow right AT the edge itself so the
-            // transition from shadow to grass is soft (kills aliasing on the
-            // grass-side boundary). This is a short smoothstep in the first
-            // few percent of distFromEdge.
-            float nearEdgeFade = smoothstep(0.0, sB * 0.5 + 0.01, distFromEdge);
-            float dropAmt = shadowFall * nearEdgeFade * edgeMask * max(-facing, 0.0) * shadowLayer${idx};
-            // Apply to the *underlying* albedo (the base/previous layers) before blend:
-            albedo *= (1.0 - dropAmt * 0.85);
-            // Brighten the grass side via bright multiplier bump:
-            // we fold this into w's sample below by scaling la after sampling.
-            // Stash lipAmt in a temp so the sample block below can use it.
-            // (GLSL: just compute now and reuse.)
-            // --- fall through, sample below handles la brighten ---
-            // Use a global-in-scope variable:
-            float lipBoost = 1.0 + lipAmt * 0.6;
-            if (w > 0.01) {
-              vec3 la; vec3 ln; float lr; float ls;
-              sample_${l.material}(vWorldPos, geoNormal, blendWeights, scale, la, ln, lr, ls);
-              ${grad}
-              la *= brightLayer${idx} * lipBoost;
-              albedo    = mix(albedo, la, w);
-              normalAcc = mix(normalAcc, ln, w);
-              roughAcc  = mix(roughAcc, lr, w);
-              specAcc   = mix(specAcc, ls, w);
+          float gLen = length(gradW);
+          if (gLen > 1e-6) {
+            float signedDist = (w - 0.5) / gLen;     // > 0 inside the layer
+            vec2 edgeOutward = -gradW / gLen;        // outward XZ normal
+            if (signedDist > 0.0) {
+              float lW = max(highlightWidthLayer${idx}, 0.001);
+              float lipBand = 1.0 - smoothstep(0.0, lW, signedDist);
+              // softness reshapes the falloff: > 1 = rounder/bulgier, < 1 = sharper
+              lipBand = pow(lipBand, 1.0 / max(highlightSoftLayer${idx}, 0.05));
+              vec2 sunH = vec2(uSunDir.x, uSunDir.z);
+              float sunHLen = length(sunH);
+              float facing = 1.0;
+              if (sunHLen > 1e-4) {
+                sunH /= sunHLen;
+                facing = max(dot(edgeOutward, sunH), 0.0);
+              }
+              lipBoost = 1.0 + lipBand * thickLayer${idx} * facing;
             }
-          } else if (w > 0.01) {
-            vec3 la; vec3 ln; float lr; float ls;
-            sample_${l.material}(vWorldPos, geoNormal, blendWeights, scale, la, ln, lr, ls);
-            ${grad}
-            la *= brightLayer${idx};
-            albedo    = mix(albedo, la, w);
-            normalAcc = mix(normalAcc, ln, w);
-            roughAcc  = mix(roughAcc, lr, w);
-            specAcc   = mix(specAcc, ls, w);
           }
-        } else if (w > 0.01) {
-          vec3 la; vec3 ln; float lr; float ls;
-          sample_${l.material}(vWorldPos, geoNormal, blendWeights, scale, la, ln, lr, ls);
-          ${grad}
-          la *= brightLayer${idx};
-          albedo    = mix(albedo, la, w);
-          normalAcc = mix(normalAcc, ln, w);
-          roughAcc  = mix(roughAcc, lr, w);
-          specAcc   = mix(specAcc, ls, w);
         }
-      } else if (w > 0.01) {
+      }
+
+      if (w > 0.01) {
         vec3 la; vec3 ln; float lr; float ls;
         sample_${l.material}(vWorldPos, geoNormal, blendWeights, scale, la, ln, lr, ls);
         ${grad}
-        la *= brightLayer${idx};
+        // Drop shadow darkens THIS layer only (so neighbouring grass stays
+        // bright), highlight brightens it on the sun-facing edge.
+        la *= brightLayer${idx} * lipBoost;
         albedo    = mix(albedo, la, w);
         normalAcc = mix(normalAcc, ln, w);
         roughAcc  = mix(roughAcc, lr, w);
@@ -1343,6 +1319,8 @@ function buildFragmentShader(state) {
   uniform float strengthLayer${idx};
   uniform float brightLayer${idx};
   uniform float thickLayer${idx};
+  uniform float highlightWidthLayer${idx};
+  uniform float highlightSoftLayer${idx};
   uniform float shadowLayer${idx};
   uniform float shadowDistLayer${idx};
   uniform float shadowBlurLayer${idx};
@@ -1819,7 +1797,7 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 container.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 4000);
+const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 4000);
 camera.position.set(12, 10, 16);
 camera.lookAt(0, 0, 0);
 
@@ -2029,9 +2007,11 @@ function buildUniformsForState() {
     u[`strengthLayer${idx}`] = { value: l.visible === false ? 0.0 : l.strength };
     u[`brightLayer${idx}`] = { value: l.brightness };
     u[`thickLayer${idx}`] = { value: l.thickness ?? 0.0 };
+    u[`highlightWidthLayer${idx}`] = { value: l.highlightWidth ?? 0.15 };
+    u[`highlightSoftLayer${idx}`] = { value: l.highlightSoft ?? 1.0 };
     u[`shadowLayer${idx}`] = { value: l.shadowStrength ?? 0.0 };
-    u[`shadowDistLayer${idx}`] = { value: l.shadowDist ?? 0.3 };
-    u[`shadowBlurLayer${idx}`] = { value: l.shadowBlur ?? 0.15 };
+    u[`shadowDistLayer${idx}`] = { value: l.shadowDist ?? 0.02 };
+    u[`shadowBlurLayer${idx}`] = { value: l.shadowBlur ?? 0.01 };
     const en = l.edgeNoise || {};
     u[`edgeNoiseEnabledLayer${idx}`] = { value: en.enabled ? 1.0 : 0.0 };
     u[`edgeNoiseScaleLayer${idx}`]   = { value: en.scale   ?? -1.0  }; // log10 → 0.1
@@ -2228,12 +2208,11 @@ function buildWater() {
     water.material.dispose();
     water = null;
   }
-  // The BAR map viewer sizes its water plane to match the terrain footprint
-  // exactly (with a 12-unit margin). We do the same — a slightly inset
-  // plane prevents the water edges from poking into the skirt walls. The
-  // skybox handles "ocean to the horizon" so we don't need a 6× plane.
-  const extent = STATE.worldSize * 2;
-  const geo = new THREE.PlaneGeometry(extent, extent);
+  // Clip water to the terrain footprint so it doesn't extend past the map
+  // edges. The skybox handles "ocean to the horizon".
+  const width = STATE.worldSize;
+  const depth = STATE.worldSize / STATE.heightmapAspect;
+  const geo = new THREE.PlaneGeometry(width, depth);
   water = new THREE.Water(geo, {
     textureWidth: 512,
     textureHeight: 512,
@@ -2597,6 +2576,7 @@ function applyHeightFloat32(heightInfo) {
   sharedUniforms.uHeightMaxWorld.value = info.max * scale;
 
   rebuildGeometry();
+  buildWater();
 
   if (prev && prev !== tex) prev.dispose();
   document.getElementById('stat-shader').textContent =
@@ -2740,6 +2720,10 @@ document.getElementById('heightScale').addEventListener('input', e => {
     sharedUniforms.uHeightMinWorld.value = lastHeightmapInfo.min * s;
     sharedUniforms.uHeightMaxWorld.value = lastHeightmapInfo.max * s;
   }
+});
+document.getElementById('cameraFov').addEventListener('input', e => {
+  camera.fov = parseFloat(e.target.value);
+  camera.updateProjectionMatrix();
 });
 document.getElementById('worldSize').addEventListener('input', e => {
   STATE.worldSize = parseFloat(e.target.value);
@@ -3279,9 +3263,11 @@ function materialOptionsHTML(selectedId) {
 function ensureLayerDefaults(layer) {
   if (layer.visible == null)         layer.visible = true;
   if (layer.thickness == null)       layer.thickness = 0.0;
+  if (layer.highlightWidth == null)  layer.highlightWidth = 0.15;
+  if (layer.highlightSoft == null)   layer.highlightSoft = 1.0;
   if (layer.shadowStrength == null)  layer.shadowStrength = 0.0;
-  if (layer.shadowDist == null)      layer.shadowDist = 0.3;
-  if (layer.shadowBlur == null)      layer.shadowBlur = 0.15;
+  if (layer.shadowDist == null)      layer.shadowDist = 0.02;
+  if (layer.shadowBlur == null)      layer.shadowBlur = 0.01;
   if (!layer.edgeNoise) {
     layer.edgeNoise = {
       enabled: 0,
@@ -3397,12 +3383,12 @@ function renderLayerPanel() {
       <select>${materialOptionsHTML(layer.material)}</select>
       <div class="layer-slider">
         <label>H min</label>
-        <input type="range" min="0" max="1" step="0.01" value="${layer.hMin}" data-k="hMin">
+        <input type="range" min="-0.25" max="1.25" step="0.01" value="${layer.hMin}" data-k="hMin">
         <span class="val">${layer.hMin.toFixed(2)}</span>
       </div>
       <div class="layer-slider">
         <label>H max</label>
-        <input type="range" min="0" max="1" step="0.01" value="${layer.hMax}" data-k="hMax">
+        <input type="range" min="-0.25" max="1.25" step="0.01" value="${layer.hMax}" data-k="hMax">
         <span class="val">${layer.hMax.toFixed(2)}</span>
       </div>
       <div class="layer-slider">
@@ -3431,9 +3417,19 @@ function renderLayerPanel() {
         <span class="val">${layer.brightness.toFixed(2)}</span>
       </div>
       <div class="layer-slider">
-        <label>Thickness</label>
+        <label>Highlight</label>
         <input type="range" min="0" max="2" step="0.01" value="${layer.thickness ?? 0}" data-k="thickness">
         <span class="val">${(layer.thickness ?? 0).toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>Highlight w</label>
+        <input type="range" min="0.01" max="2" step="0.01" value="${layer.highlightWidth ?? 0.15}" data-k="highlightWidth">
+        <span class="val">${(layer.highlightWidth ?? 0.15).toFixed(2)}</span>
+      </div>
+      <div class="layer-slider">
+        <label>Highlight soft</label>
+        <input type="range" min="0.1" max="5" step="0.05" value="${layer.highlightSoft ?? 1.0}" data-k="highlightSoft">
+        <span class="val">${(layer.highlightSoft ?? 1.0).toFixed(2)}</span>
       </div>
       <div class="layer-slider">
         <label>Drop shadow</label>
@@ -3442,13 +3438,13 @@ function renderLayerPanel() {
       </div>
       <div class="layer-slider">
         <label>Shadow dist</label>
-        <input type="range" min="0.01" max="1" step="0.01" value="${layer.shadowDist ?? 0.3}" data-k="shadowDist">
-        <span class="val">${(layer.shadowDist ?? 0.3).toFixed(2)}</span>
+        <input type="range" min="0" max="0.05" step="0.001" value="${layer.shadowDist ?? 0.02}" data-k="shadowDist">
+        <span class="val">${(layer.shadowDist ?? 0.02).toFixed(3)}</span>
       </div>
       <div class="layer-slider">
         <label>Shadow blur</label>
-        <input type="range" min="0.01" max="1" step="0.01" value="${layer.shadowBlur ?? 0.15}" data-k="shadowBlur">
-        <span class="val">${(layer.shadowBlur ?? 0.15).toFixed(2)}</span>
+        <input type="range" min="0" max="0.05" step="0.001" value="${layer.shadowBlur ?? 0.01}" data-k="shadowBlur">
+        <span class="val">${(layer.shadowBlur ?? 0.01).toFixed(3)}</span>
       </div>
       <div class="gradient-editor" data-edge-noise-editor>
         <div class="gradient-head">
@@ -3550,6 +3546,8 @@ function renderLayerPanel() {
         else if (key === 'strength')     u[`strengthLayer${idx}`].value = layer.visible === false ? 0.0 : val;
         else if (key === 'brightness')   u[`brightLayer${idx}`].value = val;
         else if (key === 'thickness')    u[`thickLayer${idx}`].value = val;
+        else if (key === 'highlightWidth') u[`highlightWidthLayer${idx}`].value = val;
+        else if (key === 'highlightSoft') u[`highlightSoftLayer${idx}`].value = val;
         else if (key === 'shadowStrength') u[`shadowLayer${idx}`].value = val;
         else if (key === 'shadowDist')   u[`shadowDistLayer${idx}`].value = val;
         else if (key === 'shadowBlur')   u[`shadowBlurLayer${idx}`].value = val;
@@ -3714,7 +3712,7 @@ function addAutoLayer() {
     material: 'grass',
     hMin: 0.0, hMax: 1.0, sMin: 0.0, sMax: 1.0,
     soft: 0.1, strength: 1.0, brightness: 1.0,
-    thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.3, shadowBlur: 0.15,
+    thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.02, shadowBlur: 0.01,
     edgeNoise: {
       enabled: 0, scale: -1.0, amount: 0.08, width: 0.15,
       maskHMin: 0, maskHMax: 0, maskSMin: 0, maskSMax: 0
