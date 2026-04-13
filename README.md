@@ -22,7 +22,7 @@ Everything lives in [triplanar-terrain.html](triplanar-terrain.html) — open it
 
 ## Heightmaps
 
-Load any 8/16-bit grayscale PNG via the **Load Heightmap** button. Non-square heightmaps are supported; the world plane stretches to match the image aspect ratio.
+Load any 8/16-bit grayscale PNG via the **Load Heightmap** button, or just **drag and drop** the PNG anywhere on the page. Non-square heightmaps are supported; the world plane stretches to match the image aspect ratio.
 
 ## Status
 
