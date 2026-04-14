@@ -781,6 +781,31 @@
       <input type="color" id="waterSunColor" value="#333333" style="width: 120px; height: 18px; padding: 0; border: 1px solid rgba(100, 180, 255, 0.25); background: transparent; cursor: pointer;">
     </div>
 
+    <div class="group-title">Explosions</div>
+    <div class="control-row">
+      <label>Click to fire</label>
+      <input type="range" id="explosionsEnabled" min="0" max="1" step="1" value="1">
+    </div>
+    <div class="control-row">
+      <label>Radius</label>
+      <input type="range" id="explosionsRadius" min="0.2" max="6" step="0.005" value="0.885">
+    </div>
+    <div class="control-row">
+      <label>Depth</label>
+      <input type="range" id="explosionsDepth" min="0" max="1" step="0.005" value="0.20">
+    </div>
+    <div class="control-row">
+      <label>Scorch size</label>
+      <input type="range" id="explosionsScorchExt" min="0.1" max="2.5" step="0.01" value="0.66">
+    </div>
+    <div class="control-row">
+      <label>Scorch falloff</label>
+      <input type="range" id="explosionsScorchFalloff" min="0.1" max="5" step="0.05" value="1.0">
+    </div>
+    <div class="preset-btns">
+      <button class="preset-btn" id="btn-reset-explosions">Reset Terrain</button>
+    </div>
+
     <div class="preset-btns">
       <button class="preset-btn" id="btn-load-skybox">Load Skybox</button>
       <button class="preset-btn" id="btn-clear-skybox">No Skybox</button>
@@ -899,6 +924,14 @@ const MATERIAL_LIBRARY = {
     uvScale: 0.7, uvRotation: 0.0,
     brightness: 1.0, tint: [1, 1, 1],
     roughness: 0.60, normalStrength: 1.0, specular: 1.0
+  },
+  damage: {
+    label: 'Damage / scorched',
+    color:  'textures/rock/Rock030_1K-JPG_Color.jpg',
+    normal: 'textures/rock/Rock030_1K-JPG_NormalGL.jpg',
+    uvScale: 1.8, uvRotation: 0.0,
+    brightness: 0.35, tint: [0.55, 0.40, 0.32],
+    roughness: 0.95, normalStrength: 1.3, specular: 0.3
   }
 };
 
@@ -936,6 +969,13 @@ const STATE = {
     flowSpeed: 0.002,       // per-frame increment of the time uniform
     color: '#10424c',       // base water tint
     sunColor: '#333333'     // sun specular tint
+  },
+  explosions: {
+    enabled: true,          // click-to-explode while this is on
+    radius: 0.885,          // world-space crater radius
+    depth: 0.20,            // world-unit peak depth of a single crater (accumulated additively)
+    scorchBoost: 0.66,      // scorch radius as fraction of crater radius
+    scorchFalloff: 1.0      // exponent on the scorch falloff curve (>1 = sharper edge)
   }
 };
 
@@ -953,6 +993,17 @@ const vertexShader = `
   uniform vec2  uHeightmapTexel;  // 1.0 / (image width, image height)
   uniform float uWorldWidth;      // world-space width of terrain
   uniform float uWorldDepth;      // world-space depth of terrain
+
+  // Explosion damage mask — R = scorch, G = crater depth (both 0..1)
+  uniform sampler2D uDamageMask;
+  uniform float     uDamageEnabled;
+  uniform float     uDamageMaxDepth;
+
+  // Crater depth in world units at a given UV (uv.x → +X, uv.y → -Z).
+  float sampleCraterDepth(vec2 uv) {
+    if (uDamageEnabled < 0.5) return 0.0;
+    return texture2D(uDamageMask, uv).g * uDamageMaxDepth;
+  }
 
   varying vec3 vWorldPos;
   varying vec3 vWorldNormal;
@@ -1031,6 +1082,8 @@ const vertexShader = `
   void main() {
     vec3 pos = position;
     float height = sampleHeight(uv, pos);
+    // Subtract crater depth at this UV so the vertex sinks into the explosion pit.
+    height -= sampleCraterDepth(uv);
     pos += normal * height;
     vHeight = height;
 
@@ -1054,6 +1107,10 @@ const vertexShader = `
       hR = texture2D(uHeightmap, uv + vec2(uHeightmapTexel.x, 0.0)).r * uHeightScale;
       hD = texture2D(uHeightmap, uv - vec2(0.0, uHeightmapTexel.y)).r * uHeightScale;
       hU = texture2D(uHeightmap, uv + vec2(0.0, uHeightmapTexel.y)).r * uHeightScale;
+      hL -= sampleCraterDepth(uv - vec2(uHeightmapTexel.x, 0.0));
+      hR -= sampleCraterDepth(uv + vec2(uHeightmapTexel.x, 0.0));
+      hD -= sampleCraterDepth(uv - vec2(0.0, uHeightmapTexel.y));
+      hU -= sampleCraterDepth(uv + vec2(0.0, uHeightmapTexel.y));
     } else {
       // For the procedural branch, probe fbm at world-XZ offsets around the
       // current point. Reconstruct world XZ from uv (uv.y → -Z).
@@ -1067,6 +1124,10 @@ const vertexShader = `
       hR = (fbm(oR.xzy * 0.3 + uTime * 0.02) * 0.7 + fbm(oR.xzy * 0.8 + 50.0) * 0.3) * uDisplacement;
       hD = (fbm(oD.xzy * 0.3 + uTime * 0.02) * 0.7 + fbm(oD.xzy * 0.8 + 50.0) * 0.3) * uDisplacement;
       hU = (fbm(oU.xzy * 0.3 + uTime * 0.02) * 0.7 + fbm(oU.xzy * 0.8 + 50.0) * 0.3) * uDisplacement;
+      hL -= sampleCraterDepth(uv - vec2(uHeightmapTexel.x, 0.0));
+      hR -= sampleCraterDepth(uv + vec2(uHeightmapTexel.x, 0.0));
+      hD -= sampleCraterDepth(uv - vec2(0.0, uHeightmapTexel.y));
+      hU -= sampleCraterDepth(uv + vec2(0.0, uHeightmapTexel.y));
     }
     // +X tangent runs in +world-X with height slope hR-hL.
     // "U" neighbor is in -world-Z, so the Z-tangent runs in -Z.
@@ -1088,10 +1149,12 @@ const vertexShader = `
 //   - A sampler uniform trio per *unique* material used (dedupe across layers)
 //   - A fetch block for each layer that early-outs on zero weight
 function buildFragmentShader(state) {
-  // Collect unique materials referenced by base + layers
+  // Collect unique materials referenced by base + layers. 'damage' is
+  // always compiled in so the explosion overlay has something to sample.
   const usedMats = new Set();
   usedMats.add(state.baseLayer.material);
   for (const l of state.layers) usedMats.add(l.material);
+  usedMats.add('damage');
   const matList = [...usedMats];
 
   // Sampler + tunable uniforms per material
@@ -1169,6 +1232,11 @@ function buildFragmentShader(state) {
     const heightGrad = applyGradient(idx, 'grad',      'h',   'gh');
     const slopeGrad  = applyGradient(idx, 'slopeGrad', 'slp', 'gs');
     const grad = heightGrad + slopeGrad;
+    // Organic layers (grass, snow, sand) get erased where the damage mask
+    // has scorched the ground. Rock/cliff stays because scorched material
+    // paints on top of it.
+    const erodesOnDamage = (l.material !== 'rock' && l.material !== 'cliff' && l.material !== 'damage');
+    const damageMultiply = erodesOnDamage ? '\n      w *= (1.0 - damageScorch);' : '';
     return `
     // --- Layer ${idx}: ${l.material} ---
     {
@@ -1230,7 +1298,7 @@ function buildFragmentShader(state) {
                * (1.0 - smoothstep(hMaxEdge, hMaxEdge + softLayer${idx}, h));
       float sM = smoothstep(sMinEdge - softLayer${idx}, sMinEdge, slp)
                * (1.0 - smoothstep(sMaxEdge, sMaxEdge + softLayer${idx}, slp));
-      float w = hM * sM * strengthLayer${idx};
+      float w = hM * sM * strengthLayer${idx};${damageMultiply}
 
       // ── Drop shadow on the UNDERLYING layer, just outside this layer ──
       // Dilate this layer's mask by (shadowDist + shadowBlur) and take the
@@ -1376,6 +1444,14 @@ function buildFragmentShader(state) {
   // Heightmap normalization (from CPU min/max analysis)
   uniform float uHeightMinWorld;
   uniform float uHeightMaxWorld;
+
+  // World size (used to convert vWorldPos.xz to a damage mask UV)
+  uniform float uWorldWidth;
+  uniform float uWorldDepth;
+
+  // Explosion damage mask (R = scorch, G = crater depth)
+  uniform sampler2D uDamageMask;
+  uniform float     uDamageEnabled;
 
   // Topographic contour lines
   uniform float uTopoEnabled;
@@ -1573,6 +1649,19 @@ ${matSampleFns}
     // Slope: 0 = flat (world up), 1 = vertical
     float slope = clamp(1.0 - abs(geoNormal.y), 0.0, 1.0);
 
+    // Sample explosion damage mask in world-XZ space. uv.x → +X, uv.y → -Z
+    // so the mapping below mirrors the vertex shader exactly.
+    float damageScorch = 0.0;
+    if (uDamageEnabled > 0.5) {
+      vec2 dmgUV = vec2(
+         vWorldPos.x / uWorldWidth + 0.5,
+        -vWorldPos.z / uWorldDepth + 0.5
+      );
+      if (dmgUV.x >= 0.0 && dmgUV.x <= 1.0 && dmgUV.y >= 0.0 && dmgUV.y <= 1.0) {
+        damageScorch = texture2D(uDamageMask, dmgUV).r;
+      }
+    }
+
     // Start with the BASE material as the fully-filled baseline.
     vec3  albedo;
     vec3  normalAcc;
@@ -1583,6 +1672,21 @@ ${matSampleFns}
 
     // Apply auto-layers in order. Each layer blends on top with its weight.
 ${layerBlocks}
+
+    // ── Scorched / damage overlay ──
+    // After the organic layers are composited and erased within the damage
+    // footprint, paint the dedicated damage material on top of what's left.
+    // The result is: rock/cliff on the crater walls and scorched material
+    // over them, with grass/snow/sand fully erased inside the blast radius.
+    if (damageScorch > 0.001) {
+      vec3 dAlb; vec3 dNrm; float dRgh; float dSpc;
+      sample_damage(vWorldPos, geoNormal, blendWeights, scale, dAlb, dNrm, dRgh, dSpc);
+      float m = clamp(damageScorch, 0.0, 1.0);
+      albedo    = mix(albedo, dAlb, m);
+      normalAcc = mix(normalAcc, dNrm, m);
+      roughAcc  = mix(roughAcc, dRgh, m);
+      specAcc   = mix(specAcc, dSpc, m);
+    }
 
     vec3 normal = normalize(normalAcc);
     float roughness = clamp(roughAcc, 0.04, 1.0);
@@ -1858,6 +1962,17 @@ const sharedUniforms = {
   uWorldWidth: { value: STATE.worldSize },
   uWorldDepth: { value: STATE.worldSize },
 
+  // Explosion damage mask. R = scorched amount (0..1), G = crater depth
+  // (0..1, multiplied by uDamageMaxDepth world units at the vertex stage).
+  uDamageMask:     { value: null },
+  uDamageTexel:    { value: new THREE.Vector2(1.0 / 1024.0, 1.0 / 1024.0) },
+  // Reference world-unit depth for a FULLY saturated G channel. Fixed at
+  // paint time: the explosion slider stores depth as (actualDepth / 5.0) in
+  // the G byte, so changing the slider later never retroactively deepens
+  // existing craters. Keep this in sync with the Depth slider's max value.
+  uDamageMaxDepth: { value: 5.0 },
+  uDamageEnabled:  { value: 0.0 },
+
   uHeightMinWorld: { value: 0.0 },
   uHeightMaxWorld: { value: 1.0 },
 
@@ -1976,6 +2091,7 @@ function buildUniformsForState() {
   const mats = new Set();
   mats.add(STATE.baseLayer.material);
   for (const l of STATE.layers) mats.add(l.material);
+  mats.add('damage');
   for (const id of mats) {
     const m = MATERIAL_LIBRARY[id];
     if (!m._uniforms) {
@@ -2208,6 +2324,12 @@ function buildWater() {
     water.material.dispose();
     water = null;
   }
+  // Skip construction entirely when water is disabled. THREE.Water allocates
+  // a 512² WebGLRenderTarget and renders the full scene into it every frame
+  // for its reflection pass — building it up-front costs VRAM even while
+  // hidden. Deferring the build until the slider actually turns on means
+  // the default (water off) session pays zero water cost.
+  if (!STATE.water.enabled) return;
   // Clip water to the terrain footprint so it doesn't extend past the map
   // edges. The skybox handles "ocean to the horizon".
   const width = STATE.worldSize;
@@ -2298,6 +2420,9 @@ const depthVertexShader = `
   uniform float uUseHeightmap;
   uniform float uHeightScale;
   uniform float uTime;
+  uniform sampler2D uDamageMask;
+  uniform float     uDamageEnabled;
+  uniform float     uDamageMaxDepth;
 
   vec3 mod289(vec3 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
   vec4 mod289(vec4 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
@@ -2360,6 +2485,9 @@ const depthVertexShader = `
       float n2 = fbm(pos.xzy * 0.8 + 50.0);
       height = (n * 0.7 + n2 * 0.3) * uDisplacement;
     }
+    if (uDamageEnabled > 0.5) {
+      height -= texture2D(uDamageMask, uv).g * uDamageMaxDepth;
+    }
     pos += normal * height;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
   }
@@ -2381,11 +2509,14 @@ const depthMaterial = new THREE.ShaderMaterial({
   vertexShader: depthVertexShader,
   fragmentShader: depthFragmentShader,
   uniforms: {
-    uDisplacement:  sharedUniforms.uDisplacement,
-    uHeightmap:     sharedUniforms.uHeightmap,
-    uUseHeightmap:  sharedUniforms.uUseHeightmap,
-    uHeightScale:   sharedUniforms.uHeightScale,
-    uTime:          sharedUniforms.uTime
+    uDisplacement:    sharedUniforms.uDisplacement,
+    uHeightmap:       sharedUniforms.uHeightmap,
+    uUseHeightmap:    sharedUniforms.uUseHeightmap,
+    uHeightScale:     sharedUniforms.uHeightScale,
+    uTime:            sharedUniforms.uTime,
+    uDamageMask:      sharedUniforms.uDamageMask,
+    uDamageEnabled:   sharedUniforms.uDamageEnabled,
+    uDamageMaxDepth:  sharedUniforms.uDamageMaxDepth
   },
   side: THREE.DoubleSide
 });
@@ -2560,8 +2691,770 @@ function makeHeightDataTexture(heightInfo) {
   return tex;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+//  EXPLOSION DAMAGE MASK
+// ═══════════════════════════════════════════════════════════════════════
+// CPU-side RGBA8 texture sized to match the heightmap (or 1024² in
+// procedural mode). R = scorched amount, G = crater depth. The vertex
+// shader subtracts G * uDamageMaxDepth from the terrain height; the
+// fragment shader uses R to erase organic layers and paint the damage
+// material on top of rock/cliff.
+let damageMaskTex = null;
+let damageMaskData = null;
+let damageMaskW = 0;
+let damageMaskH = 0;
+// Accumulated "dirty rectangle" for the current frame's mask writes. If any
+// pixels were touched we upload only that sub-rect to the GPU via
+// gl.texSubImage2D, instead of re-uploading the entire 16 MB float texture.
+// Values are inclusive pixel bounds; -1 means "empty".
+const damageDirty = { minX: -1, minY: -1, maxX: -1, maxY: -1 };
+function damageDirtyReset() {
+  damageDirty.minX = damageDirty.minY = damageDirty.maxX = damageDirty.maxY = -1;
+}
+function damageDirtyExpand(x0, y0, x1, y1) {
+  if (damageDirty.minX === -1) {
+    damageDirty.minX = x0; damageDirty.minY = y0;
+    damageDirty.maxX = x1; damageDirty.maxY = y1;
+  } else {
+    if (x0 < damageDirty.minX) damageDirty.minX = x0;
+    if (y0 < damageDirty.minY) damageDirty.minY = y0;
+    if (x1 > damageDirty.maxX) damageDirty.maxX = x1;
+    if (y1 > damageDirty.maxY) damageDirty.maxY = y1;
+  }
+}
+// Scratch buffer reused frame-to-frame for the partial-upload rect. Grows
+// on demand; never shrinks, so a big blast sets the ceiling once.
+let damagePatchBuf = null;
+let damagePatchBufCapacity = 0;
+
+function makeDamageMask(w, h) {
+  damageMaskW = w;
+  damageMaskH = h;
+  // Float32 RGBA so accumulated crater depth has effectively unlimited
+  // precision. With 8-bit storage each additive delta was quantized to
+  // 1/255 of the pinned max depth (~0.02 world units) and small repeated
+  // blasts would round away to zero. Floats keep every contribution.
+  damageMaskData = new Float32Array(w * h * 4);  // all zeros = pristine terrain
+  const tex = new THREE.DataTexture(
+    damageMaskData, w, h,
+    THREE.RGBAFormat,
+    THREE.FloatType
+  );
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  // Match the heightmap orientation so worldXZ → UV lines up with both.
+  tex.flipY = true;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function ensureDamageMask() {
+  // Sync the mask to either the current heightmap resolution or 1024² for
+  // procedural terrain. Called on init and whenever the heightmap changes.
+  let w = 1024, h = 1024;
+  if (lastHeightmapInfo) {
+    w = lastHeightmapInfo.width;
+    h = lastHeightmapInfo.height;
+  }
+  if (damageMaskTex && damageMaskW === w && damageMaskH === h) {
+    // Already correct size — just clear it.
+    damageMaskData.fill(0);
+    damageMaskTex.needsUpdate = true;
+    return;
+  }
+  if (damageMaskTex) damageMaskTex.dispose();
+  damageMaskTex = makeDamageMask(w, h);
+  sharedUniforms.uDamageMask.value = damageMaskTex;
+  sharedUniforms.uDamageTexel.value.set(1.0 / w, 1.0 / h);
+  sharedUniforms.uDamageEnabled.value = 1.0;
+}
+
+function resetDamageMask() {
+  if (!damageMaskData) return;
+  damageMaskData.fill(0);
+  damageMaskTex.needsUpdate = true;
+  // Kill any in-flight animated blasts so they don't immediately repaint
+  // their progress into the freshly-cleared mask.
+  if (typeof activeBlasts !== 'undefined') activeBlasts.length = 0;
+}
+
+// Sample the displaced terrain height at a world-XZ point. Mirrors exactly
+// what the vertex shader does: bilinear heightmap sample minus crater depth.
+// Returns the world-Y of the actual visible surface, or 0 if we're off the map.
+function sampleTerrainY(wx, wz) {
+  const worldW = STATE.worldSize;
+  const worldD = STATE.worldSize / STATE.heightmapAspect;
+  // world → uv (same convention as the shaders). uv.x → +X, uv.y → -Z.
+  const u = wx / worldW + 0.5;
+  const v = -wz / worldD + 0.5;
+  if (u < 0 || u > 1 || v < 0 || v > 1) return 0;
+
+  // ── Base height (bilinear on the heightmap, or procedural fbm fallback) ──
+  let h = 0;
+  if (lastHeightmapInfo && lastHeightmapInfo.data) {
+    const { width: W, height: H, data } = lastHeightmapInfo;
+    // PNG rows are stored top-to-bottom in `data` (row 0 = top of image).
+    // The texture is uploaded with flipY=true, so in shader UV space v=1 maps
+    // to row 0. When we sample the CPU array directly we must apply the same
+    // flip by using (1 - v).
+    const fx = u * (W - 1);
+    const fy = (1 - v) * (H - 1);
+    const x0 = Math.floor(fx), x1 = Math.min(W - 1, x0 + 1);
+    const y0 = Math.floor(fy), y1 = Math.min(H - 1, y0 + 1);
+    const tx = fx - x0;
+    const ty = fy - y0;
+    const h00 = data[y0 * W + x0];
+    const h10 = data[y0 * W + x1];
+    const h01 = data[y1 * W + x0];
+    const h11 = data[y1 * W + x1];
+    const hx0 = h00 * (1 - tx) + h10 * tx;
+    const hx1 = h01 * (1 - tx) + h11 * tx;
+    h = (hx0 * (1 - ty) + hx1 * ty) * sharedUniforms.uHeightScale.value;
+  }
+  // (No procedural fbm fallback on the CPU — we'd have to reimplement
+  // snoise/fbm in JS. For procedural mode the raycaster falls back to a
+  // plane intersection at Y=0, which is close enough for click targeting.)
+
+  // ── Subtract crater depth ──
+  if (damageMaskData && sharedUniforms.uDamageEnabled.value > 0.5) {
+    const W = damageMaskW, H = damageMaskH;
+    const fx = u * (W - 1);
+    const fy = v * (H - 1);
+    const x0 = Math.floor(fx), x1 = Math.min(W - 1, x0 + 1);
+    const y0 = Math.floor(fy), y1 = Math.min(H - 1, y0 + 1);
+    const tx = fx - x0;
+    const ty = fy - y0;
+    const g00 = damageMaskData[(y0 * W + x0) * 4 + 1];
+    const g10 = damageMaskData[(y0 * W + x1) * 4 + 1];
+    const g01 = damageMaskData[(y1 * W + x0) * 4 + 1];
+    const g11 = damageMaskData[(y1 * W + x1) * 4 + 1];
+    const gx0 = g00 * (1 - tx) + g10 * tx;
+    const gx1 = g01 * (1 - tx) + g11 * tx;
+    const crater = gx0 * (1 - ty) + gx1 * ty;
+    h -= crater * sharedUniforms.uDamageMaxDepth.value;
+  }
+  return h;
+}
+
+// Raymarch from the camera through the click direction, stepping along the
+// ray until we cross below the displaced surface. Returns a THREE.Vector3
+// world-space hit point, or null if nothing was hit.
+function raycastDisplacedTerrain(origin, dir) {
+  // Expected height range so we can intersect an enclosing AABB to skip the
+  // empty air above the terrain and save samples.
+  const yMin = sharedUniforms.uHeightMinWorld.value - 0.5;
+  const yMax = sharedUniforms.uHeightMaxWorld.value + 0.5;
+  const halfW = STATE.worldSize * 0.5;
+  const halfD = (STATE.worldSize / STATE.heightmapAspect) * 0.5;
+
+  // Ray vs AABB slab test — only accept hits in front of the camera.
+  let tMin = -Infinity, tMax = Infinity;
+  const bounds = [
+    [-halfW, halfW, origin.x, dir.x],
+    [yMin,   yMax,  origin.y, dir.y],
+    [-halfD, halfD, origin.z, dir.z]
+  ];
+  for (const [lo, hi, o, d] of bounds) {
+    if (Math.abs(d) < 1e-8) {
+      if (o < lo || o > hi) return null;
+      continue;
+    }
+    const t1 = (lo - o) / d;
+    const t2 = (hi - o) / d;
+    const tLo = Math.min(t1, t2);
+    const tHi = Math.max(t1, t2);
+    if (tLo > tMin) tMin = tLo;
+    if (tHi < tMax) tMax = tHi;
+    if (tMin > tMax) return null;
+  }
+  if (tMax < 0) return null;
+  let t = Math.max(tMin, 0);
+
+  // Step size: roughly one heightmap texel worth of world distance. Smaller
+  // steps = more accurate hits but more samples. ~1000 steps upper bound.
+  let texelWorld = 0.05;
+  if (lastHeightmapInfo) {
+    const wpt = STATE.worldSize / Math.max(lastHeightmapInfo.width, lastHeightmapInfo.height);
+    texelWorld = Math.max(wpt * 0.75, 0.02);
+  }
+  const dirLen = Math.hypot(dir.x, dir.y, dir.z);
+  const stepT = texelWorld / Math.max(dirLen, 1e-6);
+
+  let prevT = t;
+  let prevY = origin.y + dir.y * prevT;
+  let prevSurf = sampleTerrainY(origin.x + dir.x * prevT, origin.z + dir.z * prevT);
+  let prevAbove = prevY > prevSurf;
+
+  const maxSteps = 1500;
+  for (let i = 0; i < maxSteps; i++) {
+    t += stepT;
+    if (t > tMax) break;
+    const x = origin.x + dir.x * t;
+    const y = origin.y + dir.y * t;
+    const z = origin.z + dir.z * t;
+    const surf = sampleTerrainY(x, z);
+    const above = y > surf;
+    if (prevAbove && !above) {
+      // Crossed below the surface between prevT and t. Bisect for precision.
+      let lo = prevT, hi = t;
+      for (let b = 0; b < 8; b++) {
+        const mid = (lo + hi) * 0.5;
+        const mx = origin.x + dir.x * mid;
+        const my = origin.y + dir.y * mid;
+        const mz = origin.z + dir.z * mid;
+        const ms = sampleTerrainY(mx, mz);
+        if (my > ms) lo = mid; else hi = mid;
+      }
+      const hitT = (lo + hi) * 0.5;
+      return new THREE.Vector3(
+        origin.x + dir.x * hitT,
+        origin.y + dir.y * hitT,
+        origin.z + dir.z * hitT
+      );
+    }
+    prevT = t; prevY = y; prevSurf = surf; prevAbove = above;
+  }
+  return null;
+}
+
+// Active blasts currently animating their deformation/scorch paint. Each
+// stores the snapshot of params captured at click time plus how much of
+// its depth/scorch contribution has already been written to the mask.
+const activeBlasts = [];
+
+// Queue a new crater at world-XZ (wx, wz) with the given radius. The mask
+// writes are spread over ~0.45s so the ground punches in instead of popping.
+// Crater profile is a real crater: raised rim, depressed bowl, scorch
+// extends a little beyond the rim.
+function paintExplosion(wx, wz, radius) {
+  if (!damageMaskData) return;
+  const worldW = STATE.worldSize;
+  const worldD = STATE.worldSize / STATE.heightmapAspect;
+  const uCenter = (wx / worldW + 0.5);
+  const vCenter = (-wz / worldD + 0.5);
+  if (uCenter < -0.1 || uCenter > 1.1 || vCenter < -0.1 || vCenter > 1.1) return;
+
+  // Snapshot every parameter at fire time so later slider moves don't
+  // retroactively deform in-flight blasts. Animation uses paintExplosionDelta
+  // each frame to walk the mask from its current state toward the target.
+  activeBlasts.push({
+    wx, wz, radius,
+    depthMul:     Math.max(0, STATE.explosions.depth || 0),
+    scorchExt:    Math.max(0.01, STATE.explosions.scorchBoost || 0.66),
+    scorchPow:    Math.max(0.05, STATE.explosions.scorchFalloff || 1.0),
+    depthDur:     0.35,   // seconds to fully punch in the crater
+    scorchDur:    0.55,   // seconds to fully bloom the scorch (a touch slower)
+    age:          0.0,
+    depthProg:    0.0,    // fraction of target depth already written
+    scorchProg:   0.0,    // fraction of target scorch already written
+  });
+}
+
+// Write (targetDepth * depthProg - lastDepthProg) and (targetScorch * scorchProg)
+// into the damage mask for a single active blast. Called each frame with the
+// updated progress values, then the blast remembers the new progress so the
+// next frame writes only the incremental delta.
+function paintExplosionContribution(blast, newDepthProg, newScorchProg) {
+  if (!damageMaskData) return;
+  const W = damageMaskW;
+  const H = damageMaskH;
+  const worldW = STATE.worldSize;
+  const worldD = STATE.worldSize / STATE.heightmapAspect;
+  const uCenter = (blast.wx / worldW + 0.5);
+  const vCenter = (-blast.wz / worldD + 0.5);
+
+  const rimRatio  = 0.85;
+  const scorchExt = blast.scorchExt;
+  const scorchPow = blast.scorchPow;
+  const rxCrater  = (blast.radius / worldW) * W;
+  const ryCrater  = (blast.radius / worldD) * H;
+  const cx = uCenter * W;
+  const cy = (1 - vCenter) * H;
+
+  const depthDeltaFrac = newDepthProg - blast.depthProg;  // ≥ 0 by construction
+  const scorchFrac     = newScorchProg;                    // absolute, since R is max-blend
+
+  const rxOuter = rxCrater * Math.max(1.0, scorchExt);
+  const ryOuter = ryCrater * Math.max(1.0, scorchExt);
+  const x0 = Math.max(0, Math.floor(cx - rxOuter - 1));
+  const x1 = Math.min(W - 1, Math.ceil(cx + rxOuter + 1));
+  const y0 = Math.max(0, Math.floor(cy - ryOuter - 1));
+  const y1 = Math.min(H - 1, Math.ceil(cy + ryOuter + 1));
+  damageDirtyExpand(x0, y0, x1, y1);
+
+  const maxDepth = sharedUniforms.uDamageMaxDepth.value;
+
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const nx = (x - cx) / rxCrater;
+      const ny = (y - cy) / ryCrater;
+      const d = Math.sqrt(nx * nx + ny * ny);
+
+      // Scorch (R) — max-blend toward targetScorch * scorchFrac
+      if (d < scorchExt && scorchFrac > 0) {
+        const t = 1.0 - smoothstep01(0.0, scorchExt, d);
+        const scorch = Math.pow(t, scorchPow) * scorchFrac;
+        const idx = (y * W + x) * 4;
+        if (scorch > damageMaskData[idx]) damageMaskData[idx] = scorch;
+      }
+
+      // Crater depth (G) — additive delta (this blast contributes
+      // depthDeltaFrac * shape * depthMul * radius this frame)
+      if (d < rimRatio && depthDeltaFrac > 0) {
+        const t = d / rimRatio;
+        const shape = 0.5 * (1.0 + Math.cos(Math.PI * t));
+        const depthWorld = shape * blast.depthMul * blast.radius * depthDeltaFrac;
+        const delta = depthWorld / maxDepth;
+        if (delta > 0) {
+          const idx = (y * W + x) * 4 + 1;
+          const combined = damageMaskData[idx] + delta;
+          damageMaskData[idx] = combined < 1 ? combined : 1;
+        }
+      }
+    }
+  }
+  blast.depthProg = newDepthProg;
+  blast.scorchProg = newScorchProg;
+}
+
+// Advance every active blast by dt seconds, paint incremental contributions,
+// retire blasts whose animations have completed.
+function updateActiveBlasts(dt) {
+  if (activeBlasts.length === 0) return;
+  let anyWrites = false;
+  for (let i = activeBlasts.length - 1; i >= 0; i--) {
+    const b = activeBlasts[i];
+    b.age += dt;
+    // Eased progress: out-cubic so the first few frames land hard and the
+    // tail glides into place — reads as a snappy punch-in, not a linear ramp.
+    const tDepth  = Math.min(1, b.age / b.depthDur);
+    const tScorch = Math.min(1, b.age / b.scorchDur);
+    const easeOut = t => 1 - Math.pow(1 - t, 3);
+    const newDepthProg  = easeOut(tDepth);
+    const newScorchProg = easeOut(tScorch);
+    if (newDepthProg  > b.depthProg + 1e-5 ||
+        newScorchProg > b.scorchProg + 1e-5) {
+      paintExplosionContribution(b, newDepthProg, newScorchProg);
+      anyWrites = true;
+    }
+    if (tDepth >= 1 && tScorch >= 1) {
+      activeBlasts.splice(i, 1);
+    }
+  }
+  if (anyWrites) uploadDamageMaskDirtyRect();
+}
+
+// Upload only the dirty sub-rect of the damage mask to the GPU. Avoids
+// re-uploading a full 1024²×RGBA×Float32 (~16 MB) every blast frame. Falls
+// back to `texture.needsUpdate = true` if the GL handle isn't ready yet
+// (before Three.js has initialised the texture on first use).
+function uploadDamageMaskDirtyRect() {
+  if (damageDirty.minX === -1) return;
+  const gl = renderer.getContext();
+  const props = renderer.properties.get(damageMaskTex);
+  const glTex = props && props.__webglTexture;
+  if (!glTex) {
+    // Texture hasn't been initialised on the GPU yet — let Three.js do
+    // the full initial upload on the next render.
+    damageMaskTex.needsUpdate = true;
+    damageDirtyReset();
+    return;
+  }
+
+  const W = damageMaskW;
+  const rx0 = damageDirty.minX;
+  const ry0 = damageDirty.minY;
+  const rx1 = damageDirty.maxX;
+  const ry1 = damageDirty.maxY;
+  const rw = rx1 - rx0 + 1;
+  const rh = ry1 - ry0 + 1;
+  const needed = rw * rh * 4;
+  if (damagePatchBufCapacity < needed) {
+    damagePatchBuf = new Float32Array(needed);
+    damagePatchBufCapacity = needed;
+  }
+  // Pack the dirty rect (row-by-row) out of the big mask into the scratch
+  // buffer. Float32Array.subarray + set is a fast typed-memory copy.
+  const src = damageMaskData;
+  const dst = damagePatchBuf;
+  for (let y = 0; y < rh; y++) {
+    const srcRow = ((ry0 + y) * W + rx0) * 4;
+    dst.set(src.subarray(srcRow, srcRow + rw * 4), y * rw * 4);
+  }
+
+  // We pass a view that covers exactly rw*rh*4 floats so WebGL doesn't
+  // read past the filled region of the reusable scratch buffer.
+  const view = dst.subarray(0, needed);
+
+  // Three.js caches per-unit texture bindings. To avoid corrupting that
+  // cache we do our raw write on a high texture unit Three doesn't use
+  // for normal material sampling, save/restore the active unit, and
+  // restore the unpack flags we touched.
+  const savedActive = gl.getParameter(gl.ACTIVE_TEXTURE);
+  const savedBinding2D = gl.getParameter(gl.TEXTURE_BINDING_2D);
+  const PARK_UNIT = gl.TEXTURE0 + 15;
+  gl.activeTexture(PARK_UNIT);
+  gl.bindTexture(gl.TEXTURE_2D, glTex);
+
+  // The DataTexture was created with flipY=true, so Three's full-upload
+  // path flips the row order on upload. We match that for sub-uploads by
+  // setting UNPACK_FLIP_Y_WEBGL and translating the destination Y to
+  // bottom-left origin (what WebGL uses after the flip). Without this,
+  // clicks on the south side of the map would punch craters in the
+  // north — the classic y-flip symptom.
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  const dstY = damageMaskH - 1 - ry1;
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, rx0, dstY, rw, rh, gl.RGBA, gl.FLOAT, view);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+
+  // Restore GL state so Three's cache stays consistent.
+  gl.bindTexture(gl.TEXTURE_2D, savedBinding2D);
+  gl.activeTexture(savedActive);
+  damageDirtyReset();
+}
+
+function smoothstep01(edge0, edge1, x) {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+// Create the initial (procedural-sized) damage mask and bind it to the
+// shared uniforms. The shader's uDamageEnabled starts at 0.0 so this is
+// safe even before the first frame renders.
+ensureDamageMask();
+
+// ═══════════════════════════════════════════════════════════════════════
+//  DEBRIS PARTICLES
+// ═══════════════════════════════════════════════════════════════════════
+// Pool of instanced boxes that get spawned on each explosion. No fire — just
+// dirt chunks launched along an outward+upward cone, pulled back down by
+// gravity, and fading out as they land.
+const DEBRIS_POOL_SIZE = 512;
+// Chunk geometry: a flat-shaded tetrahedron. Four triangular faces with
+// sharp corners read instantly as a rock shard. Non-indexed + computed
+// normals give per-face (flat) shading so each triangle catches light
+// separately — no smooth-sphere look. All instances share this single
+// geometry; per-instance non-uniform scale warps it into slabs, wedges,
+// and long shards so no two chunks look alike.
+function makeChunkGeometry() {
+  const g = new THREE.TetrahedronGeometry(0.7, 0).toNonIndexed();
+  g.computeVertexNormals();
+  return g;
+}
+const debrisGeom = makeChunkGeometry();
+const debrisMat = new THREE.MeshStandardMaterial({
+  color: 0xffffff,      // white so instanceColor * map gives the true base tint
+  map: null,            // set from the current base material on spawn / rebuild
+  roughness: 0.95,
+  metalness: 0.0,
+  transparent: true,
+  opacity: 1.0,
+  depthWrite: false     // transparent pass: skip depth writes so overlapping
+                        // chunks don't punch holes in each other while fading
+});
+// Per-instance alpha — InstancedMesh doesn't support per-instance opacity
+// out of the box, so we patch an 'instanceAlpha' attribute into the
+// standard material's shader via onBeforeCompile.
+debrisMat.onBeforeCompile = (shader) => {
+  shader.vertexShader = shader.vertexShader
+    .replace(
+      '#include <common>',
+      '#include <common>\nattribute float instanceAlpha;\nvarying float vInstanceAlpha;'
+    )
+    .replace(
+      '#include <begin_vertex>',
+      '#include <begin_vertex>\nvInstanceAlpha = instanceAlpha;'
+    );
+  shader.fragmentShader = shader.fragmentShader
+    .replace(
+      '#include <common>',
+      '#include <common>\nvarying float vInstanceAlpha;'
+    )
+    .replace(
+      '#include <dithering_fragment>',
+      'gl_FragColor.a *= vInstanceAlpha;\n#include <dithering_fragment>'
+    );
+};
+function syncDebrisMaterialToBase() {
+  const baseId = STATE.baseLayer.material;
+  const baseDef = MATERIAL_LIBRARY[baseId];
+  if (!baseDef) return;
+  const tex = getTexture(baseDef.color, { srgb: true });
+  if (debrisMat.map !== tex) {
+    debrisMat.map = tex;
+    debrisMat.needsUpdate = true;
+  }
+}
+const debrisMesh = new THREE.InstancedMesh(debrisGeom, debrisMat, DEBRIS_POOL_SIZE);
+debrisMesh.frustumCulled = false;
+debrisMesh.castShadow = false;
+debrisMesh.receiveShadow = false;
+debrisMesh.count = DEBRIS_POOL_SIZE;
+debrisMesh.instanceColor = new THREE.InstancedBufferAttribute(
+  new Float32Array(DEBRIS_POOL_SIZE * 3), 3
+);
+// Per-instance alpha attribute, read by the shader patch above. Start
+// fully opaque; updateDebris drives it down during the settled phase.
+const debrisAlphaArray = new Float32Array(DEBRIS_POOL_SIZE).fill(1.0);
+const debrisAlphaAttr = new THREE.InstancedBufferAttribute(debrisAlphaArray, 1);
+debrisAlphaAttr.setUsage(THREE.DynamicDrawUsage);
+debrisGeom.setAttribute('instanceAlpha', debrisAlphaAttr);
+scene.add(debrisMesh);
+
+// Per-instance physics state. Slot in [0..DEBRIS_POOL_SIZE). alive=false
+// means hidden (scaled to zero). Matrix/color are only updated for live
+// slots, and we hide dead ones by writing a zero-scale matrix once.
+const debrisSlots = new Array(DEBRIS_POOL_SIZE).fill(null).map(() => ({
+  alive: false,
+  pos: new THREE.Vector3(),
+  vel: new THREE.Vector3(),
+  rot: new THREE.Euler(),
+  rotVel: new THREE.Vector3(),
+  // Non-uniform per-axis scale so each chunk has its own silhouette on
+  // top of the shared geometry.
+  scale: new THREE.Vector3(0, 0, 0),
+  age: 0,
+  life: 1,          // seconds — only used once settled, for sink-out
+  settled: false,   // true after bouncing ends; starts the sink countdown
+  settleAge: 0,     // seconds spent at rest
+  settleGroundY: 0, // world-Y of the ground at the moment of settling
+  airborne: false,  // skip ground collision until the chunk clears the
+                    // surface — prevents a low-spawned chunk from ground-
+                    // testing true on frame 1 and sticking
+}));
+let debrisCursor = 0;
+const debrisZeroMat = new THREE.Matrix4().makeScale(0, 0, 0);
+for (let i = 0; i < DEBRIS_POOL_SIZE; i++) {
+  debrisMesh.setMatrixAt(i, debrisZeroMat);
+}
+debrisMesh.instanceMatrix.needsUpdate = true;
+
+const DEBRIS_TMP_MAT  = new THREE.Matrix4();
+const DEBRIS_TMP_POS  = new THREE.Vector3();
+const DEBRIS_TMP_QUAT = new THREE.Quaternion();
+const DEBRIS_TMP_SCL  = new THREE.Vector3();
+const DEBRIS_TMP_COL  = new THREE.Color();
+
+// Three size tiers per blast: a handful of big boulders, a medium shower,
+// and a cloud of small gravel. Sizes are multipliers on radius; velocity
+// is scaled per-tier so big chunks don't over-fly the crater.
+const DEBRIS_TIERS = [
+  // count, sizeMin, sizeMax, velMul, spinMul
+  { count: 5,  sizeMin: 0.09, sizeMax: 0.14, velMul: 0.55, spinMul: 0.5 },  // large
+  { count: 15, sizeMin: 0.045, sizeMax: 0.075, velMul: 0.80, spinMul: 0.8 }, // medium
+  { count: 30, sizeMin: 0.02, sizeMax: 0.04, velMul: 1.10, spinMul: 1.2 },  // small
+];
+
+// Spawn a burst of chunks at (wx, wy, wz) in three size tiers.
+function spawnDebris(wx, wy, wz, radius) {
+  syncDebrisMaterialToBase();
+  const baseDef = MATERIAL_LIBRARY[STATE.baseLayer.material];
+  const baseTint = (baseDef && baseDef.tint) || [1, 1, 1];
+  const baseBright = (STATE.baseLayer.brightness || 1.0) *
+                     ((baseDef && baseDef.brightness) || 1.0);
+  const radScale = Math.max(0.5, radius);
+  // Chunk count and size still scale with the crater, but launch
+  // velocity intentionally does NOT scale linearly: a radius-3 blast
+  // shouldn't hurl chunks 3× as high as a radius-0.885 one. We
+  // normalise on the small-explosion radius and use sqrt so big
+  // blasts throw a bit harder, not catastrophically harder.
+  const REF_RADIUS = 0.885;
+  const velRadiusScale = Math.sqrt(Math.max(0.5, radius) / REF_RADIUS);
+
+  for (const tier of DEBRIS_TIERS) {
+   for (let i = 0; i < tier.count; i++) {
+    const slotIdx = debrisCursor;
+    const s = debrisSlots[slotIdx];
+    debrisCursor = (debrisCursor + 1) % DEBRIS_POOL_SIZE;
+
+    s.alive = true;
+    s.settled = false;
+    s.settleAge = 0;
+    // Scatter spawn points around the click, then snap each one to the
+    // actual (post-crater) terrain surface so chunks visibly erupt out
+    // of the ground. We start with 'airborne = false' and disable ground
+    // collision until the chunk has cleared the surface — that way we
+    // can spawn flush with the terrain without frame-1 sticking.
+    const sx = wx + (Math.random() - 0.5) * radius * 0.2;
+    const sz = wz + (Math.random() - 0.5) * radius * 0.2;
+    const sy = sampleTerrainY(sx, sz);
+    s.pos.set(sx, sy - 0.05, sz);
+    s.airborne = false;
+
+    // Outward+upward cone. More vertical than horizontal so the fountain
+    // reads as a blast, not a shotgun spray. velMul keeps big boulders
+    // nearer the crater and lets gravel fly a bit further. Tuned along
+    // with the lower gravity below for a measured, weighty arc.
+    const angle = Math.random() * Math.PI * 2;
+    const velBase = REF_RADIUS * velRadiusScale;
+    const horiz = (0.55 + Math.random() * 0.85) * velBase * 0.9 * tier.velMul;
+    const vert  = (0.75 + Math.random() * 1.1) * velBase * 1.08 * tier.velMul;
+    s.vel.set(Math.cos(angle) * horiz, vert, Math.sin(angle) * horiz);
+
+    s.rot.set(Math.random() * 6.28, Math.random() * 6.28, Math.random() * 6.28);
+    s.rotVel.set(
+      (Math.random() - 0.5) * 10 * tier.spinMul,
+      (Math.random() - 0.5) * 10 * tier.spinMul,
+      (Math.random() - 0.5) * 10 * tier.spinMul
+    );
+    const baseScale = (tier.sizeMin + Math.random() * (tier.sizeMax - tier.sizeMin)) * radScale;
+    // Stretch each axis independently so chunks end up as slabs, wedges,
+    // long shards — anything but identical tetrahedra.
+    s.scale.set(
+      baseScale * (0.6 + Math.random() * 1.1),
+      baseScale * (0.6 + Math.random() * 1.1),
+      baseScale * (0.6 + Math.random() * 1.1)
+    );
+    s.age = 0;
+    s.life = 1.3 + Math.random() * 0.7;   // linger time after settling
+
+    // Tint the base texture slightly per-chunk so the burst doesn't look
+    // painted. Multiplies the base material's own tint + brightness so
+    // swapping the base (rock → sand) changes the debris color too.
+    const shade = 0.75 + Math.random() * 0.5;
+    debrisMesh.instanceColor.setXYZ(slotIdx,
+      baseTint[0] * baseBright * shade,
+      baseTint[1] * baseBright * shade,
+      baseTint[2] * baseBright * shade);
+    // Freshly spawned chunk is fully opaque; updateDebris drops this
+    // during the settled phase.
+    debrisAlphaArray[slotIdx] = 1.0;
+   }
+  }
+  debrisMesh.instanceColor.needsUpdate = true;
+  debrisAlphaAttr.needsUpdate = true;
+}
+
+function updateDebris(dt) {
+  const gravity = -5.2;       // world units / s² — low gravity stretches
+                              // hang-time so the blast reads weighty
+  const airDrag = Math.pow(0.985, dt * 60);   // frame-rate-independent drag
+  const spinDrag = Math.pow(0.97, dt * 60);   // continuous angular drag
+  const restitution = 0.45;   // bounce energy retained per impact (0..1)
+  const groundFriction = 0.65; // horizontal velocity retained per bounce
+  const restSpeed = 0.6;      // below this speed-on-ground, declare settled
+  let anyLive = false;
+  let anyAlphaChanged = false;
+  for (let i = 0; i < DEBRIS_POOL_SIZE; i++) {
+    const s = debrisSlots[i];
+    if (!s.alive) continue;
+    anyLive = true;
+
+    if (s.settled) {
+      // If a newer crater has dug the ground out from under a settled
+      // chunk, the chunk is now floating below the surface — despawn
+      // it instead of leaving a ghost slot around.
+      const curGroundY = sampleTerrainY(s.pos.x, s.pos.z);
+      if (s.pos.y < curGroundY - 0.1) {
+        s.alive = false;
+        debrisMesh.setMatrixAt(i, debrisZeroMat);
+        if (debrisAlphaArray[i] !== 1.0) {
+          debrisAlphaArray[i] = 1.0;
+          anyAlphaChanged = true;
+        }
+        continue;
+      }
+      // Linger briefly, then fade opacity out over the back 60% of
+      // life so the chunk dissolves in place instead of popping.
+      s.settleAge += dt;
+      if (s.settleAge >= s.life) {
+        s.alive = false;
+        debrisMesh.setMatrixAt(i, debrisZeroMat);
+        if (debrisAlphaArray[i] !== 1.0) {
+          debrisAlphaArray[i] = 1.0;   // reset for the next time this slot is reused
+          anyAlphaChanged = true;
+        }
+        continue;
+      }
+      const fadeStart = s.life * 0.4;
+      const alpha = s.settleAge > fadeStart
+        ? Math.max(0, 1 - (s.settleAge - fadeStart) / (s.life - fadeStart))
+        : 1;
+      if (debrisAlphaArray[i] !== alpha) {
+        debrisAlphaArray[i] = alpha;
+        anyAlphaChanged = true;
+      }
+      DEBRIS_TMP_POS.copy(s.pos);
+      DEBRIS_TMP_QUAT.setFromEuler(s.rot);
+      DEBRIS_TMP_SCL.copy(s.scale);
+      DEBRIS_TMP_MAT.compose(DEBRIS_TMP_POS, DEBRIS_TMP_QUAT, DEBRIS_TMP_SCL);
+      debrisMesh.setMatrixAt(i, DEBRIS_TMP_MAT);
+      continue;
+    }
+
+    s.age += dt;
+
+    // Integrate
+    s.vel.y += gravity * dt;
+    s.vel.x *= airDrag;
+    s.vel.z *= airDrag;
+    s.pos.addScaledVector(s.vel, dt);
+    // Continuous angular drag — tumble slows a little every frame, so by
+    // the time a chunk settles the rotation is already nearly stopped.
+    s.rotVel.multiplyScalar(spinDrag);
+    s.rot.x += s.rotVel.x * dt;
+    s.rot.y += s.rotVel.y * dt;
+    s.rot.z += s.rotVel.z * dt;
+
+    // Ground test against the (current) displaced terrain so chunks don't
+    // sink through newly-dug holes. Bounce with energy loss; once the
+    // chunk is slow enough on contact, declare it settled.
+    // A freshly spawned chunk sits flush with the surface — skip the
+    // collision until it has physically cleared it, otherwise the first
+    // frame immediately traps it.
+    const groundY = sampleTerrainY(s.pos.x, s.pos.z);
+    const surfaceY = groundY + 0.02;
+    if (!s.airborne) {
+      if (s.pos.y > groundY + 0.15) {
+        s.airborne = true;
+      } else if (s.pos.y < groundY - 0.5) {
+        // Pre-airborne chunk never cleared the surface (too weak a
+        // launch, or terrain dug out from underneath). Free the slot.
+        s.alive = false;
+        debrisMesh.setMatrixAt(i, debrisZeroMat);
+        if (debrisAlphaArray[i] !== 1.0) {
+          debrisAlphaArray[i] = 1.0;
+          anyAlphaChanged = true;
+        }
+        continue;
+      }
+    } else if (s.pos.y < surfaceY) {
+      s.pos.y = surfaceY;
+      const horizSpeed = Math.hypot(s.vel.x, s.vel.z);
+      const totalSpeed = Math.hypot(horizSpeed, s.vel.y);
+      if (totalSpeed < restSpeed) {
+        s.settled = true;
+        s.settleGroundY = groundY;
+        s.vel.set(0, 0, 0);
+        s.rotVel.set(0, 0, 0);
+      } else {
+        s.vel.y = -s.vel.y * restitution;
+        s.vel.x *= groundFriction;
+        s.vel.z *= groundFriction;
+        // Lose a bit of spin on every impact so cubes aren't whirling forever.
+        s.rotVel.multiplyScalar(0.7);
+      }
+    }
+
+    // Airborne/bouncing chunks render at full scale; fade only starts
+    // after they've settled, so nothing pops mid-bounce.
+    DEBRIS_TMP_POS.copy(s.pos);
+    DEBRIS_TMP_QUAT.setFromEuler(s.rot);
+    DEBRIS_TMP_SCL.copy(s.scale);
+    DEBRIS_TMP_MAT.compose(DEBRIS_TMP_POS, DEBRIS_TMP_QUAT, DEBRIS_TMP_SCL);
+    debrisMesh.setMatrixAt(i, DEBRIS_TMP_MAT);
+  }
+  if (anyLive) debrisMesh.instanceMatrix.needsUpdate = true;
+  if (anyAlphaChanged) debrisAlphaAttr.needsUpdate = true;
+}
+
 function applyHeightFloat32(heightInfo) {
   const info = analyzeHeightFloat32(heightInfo);
+  // Stash the raw height data alongside the metadata so the click raycaster
+  // can sample the displaced surface CPU-side.
+  info.data = heightInfo.data;
   lastHeightmapInfo = info;
   STATE.heightmapAspect = info.width / info.height;
 
@@ -2576,6 +3469,7 @@ function applyHeightFloat32(heightInfo) {
   sharedUniforms.uHeightMaxWorld.value = info.max * scale;
 
   rebuildGeometry();
+  ensureDamageMask();
   buildWater();
 
   if (prev && prev !== tex) prev.dispose();
@@ -2628,7 +3522,9 @@ function clearHeightmap() {
   const d = sharedUniforms.uDisplacement.value;
   sharedUniforms.uHeightMinWorld.value = -d;
   sharedUniforms.uHeightMaxWorld.value =  d;
+  lastHeightmapInfo = null;
   rebuildGeometry();
+  ensureDamageMask();
   document.getElementById('stat-shader').textContent = 'SHADER: PROCEDURAL';
 }
 
@@ -2736,6 +3632,11 @@ document.getElementById('worldSize').addEventListener('input', e => {
 // ── Water controls ──
 document.getElementById('waterEnabled').addEventListener('input', e => {
   STATE.water.enabled = parseFloat(e.target.value) > 0.5;
+  if (STATE.water.enabled && !water) {
+    // Lazy-build on first enable: init skipped construction to avoid
+    // paying the reflection RT / shader compile cost on cold start.
+    buildWater();
+  }
   if (water) water.visible = STATE.water.enabled;
 });
 document.getElementById('waterHeight').addEventListener('input', e => {
@@ -2774,6 +3675,63 @@ document.getElementById('waterAlpha').addEventListener('input', e => {
   if (water && water.material.uniforms.alpha) {
     water.material.uniforms.alpha.value = STATE.water.alpha;
   }
+});
+
+// ── Explosion controls ──
+document.getElementById('explosionsEnabled').addEventListener('input', e => {
+  STATE.explosions.enabled = parseFloat(e.target.value) > 0.5;
+});
+document.getElementById('explosionsRadius').addEventListener('input', e => {
+  STATE.explosions.radius = parseFloat(e.target.value);
+});
+document.getElementById('explosionsDepth').addEventListener('input', e => {
+  STATE.explosions.depth = parseFloat(e.target.value);
+});
+document.getElementById('explosionsScorchExt').addEventListener('input', e => {
+  STATE.explosions.scorchBoost = parseFloat(e.target.value);
+});
+document.getElementById('explosionsScorchFalloff').addEventListener('input', e => {
+  STATE.explosions.scorchFalloff = parseFloat(e.target.value);
+});
+document.getElementById('btn-reset-explosions').addEventListener('click', () => {
+  resetDamageMask();
+});
+
+// Turn a mouse click into a world-space hit on the displaced terrain. We
+// march a ray through the heightmap CPU-side (see raycastDisplacedTerrain)
+// so the hit point matches what the player actually sees on screen instead
+// of the flat base plane.
+const explosionPointer = new THREE.Vector2();
+const explosionRayOrigin = new THREE.Vector3();
+const explosionRayDir    = new THREE.Vector3();
+let explosionMouseDown = null;
+renderer.domElement.addEventListener('pointerdown', e => {
+  if (e.button !== 0) return;
+  explosionMouseDown = { x: e.clientX, y: e.clientY };
+});
+renderer.domElement.addEventListener('pointerup', e => {
+  if (e.button !== 0 || !explosionMouseDown) return;
+  const dx = e.clientX - explosionMouseDown.x;
+  const dy = e.clientY - explosionMouseDown.y;
+  explosionMouseDown = null;
+  if (dx * dx + dy * dy > 25) return;           // treat drags as orbit, not fire
+  if (!STATE.explosions.enabled) return;
+  if (!terrain) return;
+
+  // Build the world-space ray from the click position.
+  const rect = renderer.domElement.getBoundingClientRect();
+  explosionPointer.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
+  explosionPointer.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
+  explosionRayOrigin.copy(camera.position);
+  explosionRayDir.set(explosionPointer.x, explosionPointer.y, 0.5)
+    .unproject(camera)
+    .sub(camera.position)
+    .normalize();
+
+  const hit = raycastDisplacedTerrain(explosionRayOrigin, explosionRayDir);
+  if (!hit) return;
+  paintExplosion(hit.x, hit.z, STATE.explosions.radius);
+  spawnDebris(hit.x, hit.y, hit.z, STATE.explosions.radius);
 });
 
 // Lighting group
@@ -3890,8 +4848,14 @@ let frameTimeAccum = 0;
 let frameTimeSamples = 0;
 let avgFrameTimeMs = 0;
 
+let _prevFrameMs = 0;
 function animate(now) {
   requestAnimationFrame(animate);
+
+  // dt in seconds, clamped so a tab-switch or hitch doesn't teleport debris
+  // halfway across the map on the next frame.
+  const dt = _prevFrameMs === 0 ? 0.016 : Math.min(0.05, (now - _prevFrameMs) / 1000);
+  _prevFrameMs = now;
 
   frameCount++;
   if (now - lastTime >= 1000) {
@@ -3925,6 +4889,10 @@ function animate(now) {
   }
 
   sharedUniforms.uTime.value = now * 0.001;
+
+  // Drive in-flight explosion animations and airborne debris chunks.
+  updateActiveBlasts(dt);
+  updateDebris(dt);
 
   // Keep the sun pointing from uSunDir, scaled to sit outside the terrain.
   const sd = sharedUniforms.uSunDir.value;
