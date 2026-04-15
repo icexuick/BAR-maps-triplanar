@@ -302,6 +302,25 @@
     border-color: rgba(100, 180, 255, 0.12);
     background: rgba(10, 20, 35, 0.5);
   }
+  .layer-fix {
+    background: transparent;
+    border: 1px solid rgba(255, 200, 100, 0.25);
+    border-radius: 3px;
+    color: rgba(255, 220, 180, 0.45);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    cursor: pointer;
+    margin-right: 6px;
+  }
+  .layer-fix:hover { border-color: rgba(255, 210, 130, 0.55); color: #fff; }
+  .layer-fix.on {
+    color: rgba(255, 230, 150, 1.0);
+    border-color: rgba(255, 200, 100, 0.6);
+    background: rgba(40, 28, 10, 0.5);
+  }
   .layer-card.hidden-layer { opacity: 0.55; }
   .layer-card.hidden-layer .layer-tag { opacity: 0.5; }
 
@@ -795,12 +814,24 @@
       <input type="range" id="explosionsDepth" min="0" max="1" step="0.005" value="0.20">
     </div>
     <div class="control-row">
+      <label>Depth falloff</label>
+      <input type="range" id="explosionsDepthFalloff" min="0.3" max="4" step="0.05" value="1.0">
+    </div>
+    <div class="control-row">
+      <label>Rim height</label>
+      <input type="range" id="explosionsRimHeight" min="0" max="1.5" step="0.01" value="0.35">
+    </div>
+    <div class="control-row">
       <label>Scorch size</label>
       <input type="range" id="explosionsScorchExt" min="0.1" max="2.5" step="0.01" value="0.66">
     </div>
     <div class="control-row">
       <label>Scorch falloff</label>
       <input type="range" id="explosionsScorchFalloff" min="0.1" max="5" step="0.05" value="1.0">
+    </div>
+    <div class="control-row">
+      <label>Scorch spikes</label>
+      <input type="range" id="explosionsScorchSpikes" min="0" max="1" step="0.01" value="0.65">
     </div>
     <div class="preset-btns">
       <button class="preset-btn" id="btn-reset-explosions">Reset Terrain</button>
@@ -947,10 +978,10 @@ const STATE = {
   layers: [
     // id, material, height range, slope range, softness, strength, brightness,
     // thickness (fake ledge height, world units, 0 = flat), shadowStrength (drop shadow darkness 0..1)
-    { id: 1, material: 'sand',  hMin: 0.00, hMax: 0.20, sMin: 0.00, sMax: 1.00, soft: 0.10, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.02, shadowBlur: 0.01},
-    { id: 3, material: 'cliff', hMin: 0.00, hMax: 1.00, sMin: 0.45, sMax: 1.00, soft: 0.15, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.02, shadowBlur: 0.01},
-    { id: 2, material: 'grass', hMin: 0.10, hMax: 0.70, sMin: 0.00, sMax: 0.40, soft: 0.15, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.02, shadowBlur: 0.01},
-    { id: 4, material: 'snow',  hMin: 0.75, hMax: 1.00, sMin: 0.00, sMax: 0.35, soft: 0.10, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.02, shadowBlur: 0.01}
+    { id: 1, material: 'sand',  hMin: 0.00, hMax: 0.20, sMin: 0.00, sMax: 1.00, soft: 0.10, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.02, shadowBlur: 0.01, fixed: false},
+    { id: 3, material: 'cliff', hMin: 0.00, hMax: 1.00, sMin: 0.45, sMax: 1.00, soft: 0.15, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.02, shadowBlur: 0.01, fixed: false},
+    { id: 2, material: 'grass', hMin: 0.10, hMax: 0.70, sMin: 0.00, sMax: 0.40, soft: 0.15, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.02, shadowBlur: 0.01, fixed: true},
+    { id: 4, material: 'snow',  hMin: 0.75, hMax: 1.00, sMin: 0.00, sMax: 0.35, soft: 0.10, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.02, shadowBlur: 0.01, fixed: false}
   ],
   nextLayerId: 5,
   biplanar: false,        // use biplanar projection instead of triplanar (2 taps per texture instead of 3)
@@ -974,8 +1005,11 @@ const STATE = {
     enabled: true,          // click-to-explode while this is on
     radius: 0.885,          // world-space crater radius
     depth: 0.20,            // world-unit peak depth of a single crater (accumulated additively)
+    depthFalloff: 1.0,      // exponent on the crater profile (>1 = wider flat floor + steeper rim, <1 = softer cone)
+    rimHeight: 0.35,        // raised rim as fraction of crater depth (0 = pure dent, 0.5 = prominent ring of upthrust)
     scorchBoost: 0.66,      // scorch radius as fraction of crater radius
-    scorchFalloff: 1.0      // exponent on the scorch falloff curve (>1 = sharper edge)
+    scorchFalloff: 1.0,     // exponent on the scorch falloff curve (>1 = sharper edge)
+    scorchSpikes: 0.65      // 0 = round scorch, 1 = strong radial rays/spikes (crater stays round either way)
   }
 };
 
@@ -1007,7 +1041,9 @@ const vertexShader = `
 
   varying vec3 vWorldPos;
   varying vec3 vWorldNormal;
+  varying vec3 vWorldNormalOriginal;  // pre-crater normal, for 'fixed' layers
   varying float vHeight;
+  varying float vHeightOriginal;  // pre-crater world-Y, for 'fixed' layers
 
   // ── Simplex noise (procedural fallback) ──
   vec3 mod289(vec3 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
@@ -1081,11 +1117,12 @@ const vertexShader = `
 
   void main() {
     vec3 pos = position;
-    float height = sampleHeight(uv, pos);
+    float heightOriginal = sampleHeight(uv, pos);
     // Subtract crater depth at this UV so the vertex sinks into the explosion pit.
-    height -= sampleCraterDepth(uv);
+    float height = heightOriginal - sampleCraterDepth(uv);
     pos += normal * height;
     vHeight = height;
+    vHeightOriginal = heightOriginal;
 
     vec4 worldPos = modelMatrix * vec4(pos, 1.0);
     vWorldPos = worldPos.xyz;
@@ -1101,16 +1138,15 @@ const vertexShader = `
     // horizontal plane (sun-from-north lights up south-facing walls, etc).
     float dx = 2.0 * uHeightmapTexel.x * uWorldWidth;
     float dz = 2.0 * uHeightmapTexel.y * uWorldDepth;
-    float hL, hR, hD, hU;
+    // Pre-crater neighbour heights (hL0/hR0/hD0/hU0) are used to build the
+    // ORIGINAL normal, so 'fixed' layers see the untouched slope. The crater
+    // deltas are then subtracted into hL/hR/hD/hU for the displaced normal.
+    float hL0, hR0, hD0, hU0;
     if (uUseHeightmap > 0.5) {
-      hL = texture2D(uHeightmap, uv - vec2(uHeightmapTexel.x, 0.0)).r * uHeightScale;
-      hR = texture2D(uHeightmap, uv + vec2(uHeightmapTexel.x, 0.0)).r * uHeightScale;
-      hD = texture2D(uHeightmap, uv - vec2(0.0, uHeightmapTexel.y)).r * uHeightScale;
-      hU = texture2D(uHeightmap, uv + vec2(0.0, uHeightmapTexel.y)).r * uHeightScale;
-      hL -= sampleCraterDepth(uv - vec2(uHeightmapTexel.x, 0.0));
-      hR -= sampleCraterDepth(uv + vec2(uHeightmapTexel.x, 0.0));
-      hD -= sampleCraterDepth(uv - vec2(0.0, uHeightmapTexel.y));
-      hU -= sampleCraterDepth(uv + vec2(0.0, uHeightmapTexel.y));
+      hL0 = texture2D(uHeightmap, uv - vec2(uHeightmapTexel.x, 0.0)).r * uHeightScale;
+      hR0 = texture2D(uHeightmap, uv + vec2(uHeightmapTexel.x, 0.0)).r * uHeightScale;
+      hD0 = texture2D(uHeightmap, uv - vec2(0.0, uHeightmapTexel.y)).r * uHeightScale;
+      hU0 = texture2D(uHeightmap, uv + vec2(0.0, uHeightmapTexel.y)).r * uHeightScale;
     } else {
       // For the procedural branch, probe fbm at world-XZ offsets around the
       // current point. Reconstruct world XZ from uv (uv.y → -Z).
@@ -1120,21 +1156,28 @@ const vertexShader = `
       vec3 oR = vec3(wXZ.x + 0.5 * dx, 0.0, wXZ.y);
       vec3 oD = vec3(wXZ.x, 0.0, wXZ.y + 0.5 * dz); // uv.y - dv → world +Z
       vec3 oU = vec3(wXZ.x, 0.0, wXZ.y - 0.5 * dz); // uv.y + dv → world -Z
-      hL = (fbm(oL.xzy * 0.3 + uTime * 0.02) * 0.7 + fbm(oL.xzy * 0.8 + 50.0) * 0.3) * uDisplacement;
-      hR = (fbm(oR.xzy * 0.3 + uTime * 0.02) * 0.7 + fbm(oR.xzy * 0.8 + 50.0) * 0.3) * uDisplacement;
-      hD = (fbm(oD.xzy * 0.3 + uTime * 0.02) * 0.7 + fbm(oD.xzy * 0.8 + 50.0) * 0.3) * uDisplacement;
-      hU = (fbm(oU.xzy * 0.3 + uTime * 0.02) * 0.7 + fbm(oU.xzy * 0.8 + 50.0) * 0.3) * uDisplacement;
-      hL -= sampleCraterDepth(uv - vec2(uHeightmapTexel.x, 0.0));
-      hR -= sampleCraterDepth(uv + vec2(uHeightmapTexel.x, 0.0));
-      hD -= sampleCraterDepth(uv - vec2(0.0, uHeightmapTexel.y));
-      hU -= sampleCraterDepth(uv + vec2(0.0, uHeightmapTexel.y));
+      hL0 = (fbm(oL.xzy * 0.3 + uTime * 0.02) * 0.7 + fbm(oL.xzy * 0.8 + 50.0) * 0.3) * uDisplacement;
+      hR0 = (fbm(oR.xzy * 0.3 + uTime * 0.02) * 0.7 + fbm(oR.xzy * 0.8 + 50.0) * 0.3) * uDisplacement;
+      hD0 = (fbm(oD.xzy * 0.3 + uTime * 0.02) * 0.7 + fbm(oD.xzy * 0.8 + 50.0) * 0.3) * uDisplacement;
+      hU0 = (fbm(oU.xzy * 0.3 + uTime * 0.02) * 0.7 + fbm(oU.xzy * 0.8 + 50.0) * 0.3) * uDisplacement;
     }
+    float hL = hL0 - sampleCraterDepth(uv - vec2(uHeightmapTexel.x, 0.0));
+    float hR = hR0 - sampleCraterDepth(uv + vec2(uHeightmapTexel.x, 0.0));
+    float hD = hD0 - sampleCraterDepth(uv - vec2(0.0, uHeightmapTexel.y));
+    float hU = hU0 - sampleCraterDepth(uv + vec2(0.0, uHeightmapTexel.y));
+
     // +X tangent runs in +world-X with height slope hR-hL.
     // "U" neighbor is in -world-Z, so the Z-tangent runs in -Z.
     vec3 tangentX = vec3(dx, hR - hL, 0.0);
     vec3 tangentZ = vec3(0.0, hU - hD, -dz);
     // cross(tX, tZ) gives +Y up for a flat surface: (+X,0,0) × (0,0,-Z) = (0, X*Z, 0) ✓
     vWorldNormal = normalize(cross(tangentX, tangentZ));
+
+    // Same cross for the pre-crater normal, so fixed layers get the original
+    // slope at this point even after an explosion has flattened/steepened it.
+    vec3 tangentX0 = vec3(dx, hR0 - hL0, 0.0);
+    vec3 tangentZ0 = vec3(0.0, hU0 - hD0, -dz);
+    vWorldNormalOriginal = normalize(cross(tangentX0, tangentZ0));
 
     gl_Position = projectionMatrix * viewMatrix * worldPos;
   }
@@ -1237,11 +1280,18 @@ function buildFragmentShader(state) {
     // paints on top of it.
     const erodesOnDamage = (l.material !== 'rock' && l.material !== 'cliff' && l.material !== 'damage');
     const damageMultiply = erodesOnDamage ? '\n      w *= (1.0 - damageScorch);' : '';
+    // Fixed layers read BOTH the pre-crater height and the pre-crater
+    // slope, so an explosion can never cause new coverage of this layer
+    // inside the new crater — only erase. Flattening a cliff (lowering
+    // slope into grass's sMin..sMax band) or digging a pit (lowering
+    // height into grass's hMin..hMax band) both get ignored.
+    const heightVar = l.fixed ? 'vHeight01Original' : 'vHeight01';
+    const slopeVar  = l.fixed ? 'slopeOriginal'    : 'slope';
     return `
-    // --- Layer ${idx}: ${l.material} ---
+    // --- Layer ${idx}: ${l.material}${l.fixed ? ' (fixed)' : ''} ---
     {
-      float h = vHeight01;
-      float slp = slope;
+      float h = ${heightVar};
+      float slp = ${slopeVar};
 
       // ── Per-edge organic noise (gated to a width band around each edge) ──
       // Each of the 4 band edges (hMin / hMax / sMin / sMax) gets its own
@@ -1465,7 +1515,9 @@ ${layerUniforms}
 
   varying vec3 vWorldPos;
   varying vec3 vWorldNormal;
+  varying vec3 vWorldNormalOriginal;
   varying float vHeight;
+  varying float vHeightOriginal;
 
   // ── Cheap 2D value noise + 2-octave fbm for layer-edge jitter ──
   // Used to break up hMin/hMax/sMin/sMax band boundaries so material
@@ -1645,9 +1697,17 @@ ${matSampleFns}
     // to the same [min..max] slider-driven range).
     float range = max(uHeightMaxWorld - uHeightMinWorld, 0.0001);
     float vHeight01 = clamp((vHeight - uHeightMinWorld) / range, 0.0, 1.0);
+    // Pre-crater normalized height, used by 'fixed' layers so an explosion
+    // can't cause new grass/sand to appear inside the new crater. Fixed
+    // layers see the terrain as it was before any damage was painted.
+    float vHeight01Original = clamp((vHeightOriginal - uHeightMinWorld) / range, 0.0, 1.0);
 
     // Slope: 0 = flat (world up), 1 = vertical
     float slope = clamp(1.0 - abs(geoNormal.y), 0.0, 1.0);
+    // Pre-crater slope for 'fixed' layers — see vHeight01Original above.
+    // Uses the pre-crater normal so an explosion flattening a cliff can't
+    // open a layer's slope band (e.g. grass) inside the new crater floor.
+    float slopeOriginal = clamp(1.0 - abs(normalize(vWorldNormalOriginal).y), 0.0, 1.0);
 
     // Sample explosion damage mask in world-XZ space. uv.x → +X, uv.y → -Z
     // so the mapping below mirrors the vertex shader exactly.
@@ -2942,8 +3002,16 @@ function paintExplosion(wx, wz, radius) {
   activeBlasts.push({
     wx, wz, radius,
     depthMul:     Math.max(0, STATE.explosions.depth || 0),
+    depthFalloff: Math.max(0.05, STATE.explosions.depthFalloff || 1.0),
+    rimHeight:    Math.max(0, STATE.explosions.rimHeight ?? 0.35),
     scorchExt:    Math.max(0.01, STATE.explosions.scorchBoost || 0.66),
     scorchPow:    Math.max(0.05, STATE.explosions.scorchFalloff || 1.0),
+    scorchSpikes: Math.min(1.5, Math.max(0, STATE.explosions.scorchSpikes ?? 0.65)),
+    // Per-blast angular seed so two blasts at the same spot don't produce
+    // identical spike patterns. Two independent seeds keep the low-frequency
+    // "envelope" noise and the high-frequency "ray" noise decorrelated.
+    seedEnv:      Math.random() * 100.0,
+    seedRay:      Math.random() * 100.0,
     depthDur:     0.35,   // seconds to fully punch in the crater
     scorchDur:    0.55,   // seconds to fully bloom the scorch (a touch slower)
     age:          0.0,
@@ -2976,8 +3044,57 @@ function paintExplosionContribution(blast, newDepthProg, newScorchProg) {
   const depthDeltaFrac = newDepthProg - blast.depthProg;  // ≥ 0 by construction
   const scorchFrac     = newScorchProg;                    // absolute, since R is max-blend
 
-  const rxOuter = rxCrater * Math.max(1.0, scorchExt);
-  const ryOuter = ryCrater * Math.max(1.0, scorchExt);
+  // Spike shaping. The angular envelope wobbles the outer scorch radius
+  // by up to ±envAmp, and the ray term adds bright radial streaks in the
+  // outer band. The crater depth loop below ignores all of this so the
+  // hole stays round.
+  const spikes     = blast.scorchSpikes;
+  const envAmp     = spikes * 0.55;   // how far the outer envelope can bulge outward/inward
+  const rayAmp     = spikes * 1.2;    // how much rays brighten the outer band
+  const scorchMax  = scorchExt * (1 + envAmp);  // worst-case outer reach for dirty-rect
+  // Hash-based 1D value noise, interpolated on the unit circle so it wraps
+  // cleanly at ±π. Used for the envelope wobble.
+  const hash1 = u => {
+    const s = Math.sin(u * 12.9898) * 43758.5453;
+    return s - Math.floor(s);
+  };
+  const angNoise = (ang, lobes, seed) => {
+    const u = ang * lobes + seed;
+    const i = Math.floor(u);
+    const f = u - i;
+    const a = hash1(i);
+    const b = hash1(i + 1);
+    const t = f * f * (3 - 2 * f);
+    return a * (1 - t) + b * t;
+  };
+  // Thin radial rays. Precompute a fixed number of ray directions with
+  // per-ray random strength and angular width — each ray is a narrow
+  // spike around its own centre, most angles fall on zero. Much thinner
+  // than bandlimited noise (which smears between grid cells).
+  const NUM_RAYS = 64;
+  const rayCenters = new Float32Array(NUM_RAYS);   // angle of each ray in [0..2π)
+  const rayAmps    = new Float32Array(NUM_RAYS);   // per-ray strength 0..1
+  const rayWidths  = new Float32Array(NUM_RAYS);   // per-ray angular half-width (radians)
+  for (let i = 0; i < NUM_RAYS; i++) {
+    // Even base spacing + jitter so they're not perfectly regular.
+    const base = (i + hash1(i + blast.seedRay * 17.0)) * (Math.PI * 2.0 / NUM_RAYS);
+    rayCenters[i] = base;
+    // Random strength — some rays are bright, some barely visible.
+    const s = hash1(i * 3.17 + blast.seedRay * 5.0);
+    rayAmps[i] = s * s;  // skew toward dim so only a few rays really punch
+    // Narrow angular half-width: ~0.6°..4° per ray at full width.
+    // Needs to be a few texels wide at the rim so linear filtering on
+    // the 1024² mask doesn't smear the ray into nothing.
+    const w = hash1(i * 7.31 + blast.seedRay * 11.0);
+    rayWidths[i] = 0.010 + w * 0.060;
+  }
+
+  // Outer reach is whichever of the scorch envelope or the crater footprint
+  // extends further out from the centre. The Recoil crater shape is fully
+  // contained in r ∈ [0..1], so its outer reach equals rimRatio.
+  const outerReach   = Math.max(scorchMax, rimRatio);
+  const rxOuter = rxCrater * outerReach;
+  const ryOuter = ryCrater * outerReach;
   const x0 = Math.max(0, Math.floor(cx - rxOuter - 1));
   const x1 = Math.min(W - 1, Math.ceil(cx + rxOuter + 1));
   const y0 = Math.max(0, Math.floor(cy - ryOuter - 1));
@@ -2993,24 +3110,88 @@ function paintExplosionContribution(blast, newDepthProg, newScorchProg) {
       const d = Math.sqrt(nx * nx + ny * ny);
 
       // Scorch (R) — max-blend toward targetScorch * scorchFrac
-      if (d < scorchExt && scorchFrac > 0) {
-        const t = 1.0 - smoothstep01(0.0, scorchExt, d);
-        const scorch = Math.pow(t, scorchPow) * scorchFrac;
-        const idx = (y * W + x) * 4;
-        if (scorch > damageMaskData[idx]) damageMaskData[idx] = scorch;
+      if (d < scorchMax && scorchFrac > 0) {
+        // Angular envelope: a few broad lobes wobble the outer radius so
+        // the scorch footprint is no longer a perfect circle.
+        let outer = scorchExt;
+        let rayBoost = 1.0;
+        if (spikes > 0) {
+          const ang = Math.atan2(ny, nx);
+          const env = angNoise(ang, 1.5, blast.seedEnv) * 2 - 1;     // [-1..1], ~3 lobes over 2π
+          outer = scorchExt * (1 + env * envAmp);
+          // Thin radial rays: walk the precomputed ray table and sum
+          // each ray's contribution. Each ray is a gaussian-ish falloff
+          // over its own narrow angular half-width, so most of the
+          // angular circle stays dark and only the rays light up.
+          let rayShape = 0;
+          // Bring pixel angle into [0..2π) so deltas are easy to wrap.
+          const angNorm = ang < 0 ? ang + Math.PI * 2 : ang;
+          for (let i = 0; i < NUM_RAYS; i++) {
+            let da = angNorm - rayCenters[i];
+            // Wrap to shortest arc in [-π..π].
+            if (da >  Math.PI) da -= Math.PI * 2;
+            if (da < -Math.PI) da += Math.PI * 2;
+            const w = rayWidths[i];
+            if (da > -w && da < w) {
+              const t = da / w;                        // -1..1 across the ray
+              const falloff = 1 - t * t;               // parabola peaking at 0
+              const fs = falloff * falloff;            // sharpen further
+              const contrib = fs * rayAmps[i];
+              if (contrib > rayShape) rayShape = contrib;
+            }
+          }
+          const coreEnd  = scorchExt * 0.35;
+          const rayMask  = smoothstep01(coreEnd, outer, d);          // 0 near centre, 1 near rim
+          rayBoost = 1 + rayAmp * rayShape * rayMask;
+        }
+        if (d < outer) {
+          const t = 1.0 - smoothstep01(0.0, outer, d);
+          let scorch = Math.pow(t, scorchPow) * scorchFrac * rayBoost;
+          if (scorch > 1) scorch = 1;
+          const idx = (y * W + x) * 4;
+          if (scorch > damageMaskData[idx]) damageMaskData[idx] = scorch;
+        }
       }
 
-      // Crater depth (G) — additive delta (this blast contributes
-      // depthDeltaFrac * shape * depthMul * radius this frame)
+      // Crater depth (G) — additive delta, this blast contributes
+      // shape * depthMul * radius * depthDeltaFrac this frame.
+      //
+      // Shape comes from Recoil/BAR's BasicMapDamage.cpp ("faked Sombrero
+      // hat, cut in half") over normalized radius r = d / rimRatio ∈ [0..1]:
+      //
+      //   c1 = cos((r - 0.1) * (π + 0.3))
+      //   c2 = cos(max(0, 3r - 2) * π)
+      //   shape = c1 * (1 - r) * (0.5 + 0.5 * c2)
+      //
+      // shape is POSITIVE in the inner bowl (~r<0.57), crosses zero, then
+      // goes NEGATIVE with a rim peak around r ≈ 0.8 before fading to 0 at
+      // r = 1. Our mask convention matches Recoil's: positive = sink,
+      // negative = lift (vertex shader does height - maskG). So we use
+      // the formula directly, no negation.
+      // depthFalloff reshapes r before feeding the formula: >1 keeps the
+      // centre full-depth longer (wider flat floor), <1 softens it.
+      // rimHeight scales ONLY the negative (lift) part so users can dial
+      // the upthrust ring without touching the bowl depth.
       if (d < rimRatio && depthDeltaFrac > 0) {
-        const t = d / rimRatio;
-        const shape = 0.5 * (1.0 + Math.cos(Math.PI * t));
-        const depthWorld = shape * blast.depthMul * blast.radius * depthDeltaFrac;
-        const delta = depthWorld / maxDepth;
-        if (delta > 0) {
+        const r = Math.pow(d / rimRatio, blast.depthFalloff);
+        const c1 = Math.cos((r - 0.1) * (Math.PI + 0.3));
+        const c2 = Math.cos(Math.max(0, 3 * r - 2) * Math.PI);
+        const shape = c1 * (1 - r) * (0.5 + 0.5 * c2);
+        // Scale only the negative (lift) band by rimHeight so the slider
+        // controls upthrust without touching bowl depth.
+        const shapeScaled = shape < 0
+          ? shape * blast.rimHeight * 2.0   // lift: scale by slider (2× so 0.5 ≈ Recoil's natural lift)
+          : shape;                          // bowl: unscaled
+        if (shapeScaled !== 0) {
+          const depthWorld = shapeScaled * blast.depthMul * blast.radius * depthDeltaFrac;
+          const delta = depthWorld / maxDepth;
           const idx = (y * W + x) * 4 + 1;
-          const combined = damageMaskData[idx] + delta;
-          damageMaskData[idx] = combined < 1 ? combined : 1;
+          let combined = damageMaskData[idx] + delta;
+          // Symmetric clamp: bowl can't exceed +1 (full sink), rim can't
+          // exceed -1 (full lift). Float storage keeps the negatives.
+          if (combined >  1) combined =  1;
+          if (combined < -1) combined = -1;
+          damageMaskData[idx] = combined;
         }
       }
     }
@@ -3687,11 +3868,20 @@ document.getElementById('explosionsRadius').addEventListener('input', e => {
 document.getElementById('explosionsDepth').addEventListener('input', e => {
   STATE.explosions.depth = parseFloat(e.target.value);
 });
+document.getElementById('explosionsDepthFalloff').addEventListener('input', e => {
+  STATE.explosions.depthFalloff = parseFloat(e.target.value);
+});
+document.getElementById('explosionsRimHeight').addEventListener('input', e => {
+  STATE.explosions.rimHeight = parseFloat(e.target.value);
+});
 document.getElementById('explosionsScorchExt').addEventListener('input', e => {
   STATE.explosions.scorchBoost = parseFloat(e.target.value);
 });
 document.getElementById('explosionsScorchFalloff').addEventListener('input', e => {
   STATE.explosions.scorchFalloff = parseFloat(e.target.value);
+});
+document.getElementById('explosionsScorchSpikes').addEventListener('input', e => {
+  STATE.explosions.scorchSpikes = parseFloat(e.target.value);
 });
 document.getElementById('btn-reset-explosions').addEventListener('click', () => {
   resetDamageMask();
@@ -4001,6 +4191,7 @@ function collectConfig() {
       range:   u.uTopoRange.value.toArray()
     },
     water: { ...STATE.water },
+    explosions: { ...STATE.explosions },
     materials: Object.fromEntries(
       Object.entries(MATERIAL_LIBRARY).map(([id, m]) => [id, {
         uvScale: m.uvScale,
@@ -4071,6 +4262,12 @@ function applyConfig(cfg) {
   if (cfg.water) {
     Object.assign(STATE.water, cfg.water);
     buildWater();
+  }
+
+  // Explosion tunables — no rebuild needed, values get snapshotted on
+  // the next paintExplosion() call.
+  if (cfg.explosions) {
+    Object.assign(STATE.explosions, cfg.explosions);
   }
 
   // Per-material tunables — write back to MATERIAL_LIBRARY and live uniforms
@@ -4161,6 +4358,14 @@ function syncSlidersFromState() {
   if (wc) wc.value = STATE.water.color;
   const wsc = document.getElementById('waterSunColor');
   if (wsc) wsc.value = STATE.water.sunColor;
+  set('explosionsEnabled',        STATE.explosions.enabled ? 1 : 0);
+  set('explosionsRadius',         STATE.explosions.radius);
+  set('explosionsDepth',          STATE.explosions.depth);
+  set('explosionsDepthFalloff',   STATE.explosions.depthFalloff);
+  set('explosionsRimHeight',      STATE.explosions.rimHeight);
+  set('explosionsScorchExt',      STATE.explosions.scorchBoost);
+  set('explosionsScorchFalloff',  STATE.explosions.scorchFalloff);
+  set('explosionsScorchSpikes',   STATE.explosions.scorchSpikes);
 }
 
 function saveConfigToFile() {
@@ -4220,6 +4425,7 @@ function materialOptionsHTML(selectedId) {
 // renderer and UI code free of endless `?? default` ladders.
 function ensureLayerDefaults(layer) {
   if (layer.visible == null)         layer.visible = true;
+  if (layer.fixed == null)           layer.fixed = false;
   if (layer.thickness == null)       layer.thickness = 0.0;
   if (layer.highlightWidth == null)  layer.highlightWidth = 0.15;
   if (layer.highlightSoft == null)   layer.highlightSoft = 1.0;
@@ -4334,6 +4540,7 @@ function renderLayerPanel() {
       <div class="layer-head">
         <span class="layer-tag">Auto ${idx + 1}</span>
         <div>
+          <button class="layer-fix ${layer.fixed ? 'on' : ''}" title="Fixed: crater height changes can't grow this layer, only erase it">${layer.fixed ? 'FIX' : 'fix'}</button>
           <button class="layer-vis ${layer.visible === false ? 'off' : ''}" title="Toggle visibility">${layer.visible === false ? 'OFF' : 'ON'}</button>
           <button class="layer-del" title="Remove layer">✕</button>
         </div>
@@ -4465,6 +4672,18 @@ function renderLayerPanel() {
     // Material change → rebuild shader
     card.querySelector('select').addEventListener('change', e => {
       layer.material = e.target.value;
+      rebuildMaterial();
+    });
+
+    // Fixed toggle → the layer reads pre-crater height in the shader so
+    // explosions can't grow new coverage inside a fresh crater. Needs a
+    // shader rebuild since the height variable is swapped at string-gen
+    // time (no branch on the hot path).
+    const fixBtn = card.querySelector('.layer-fix');
+    fixBtn.addEventListener('click', () => {
+      layer.fixed = !layer.fixed;
+      fixBtn.classList.toggle('on', layer.fixed);
+      fixBtn.textContent = layer.fixed ? 'FIX' : 'fix';
       rebuildMaterial();
     });
 
