@@ -807,7 +807,7 @@
     </div>
     <div class="control-row">
       <label>Radius</label>
-      <input type="range" id="explosionsRadius" min="0.2" max="6" step="0.005" value="0.885">
+      <input type="range" id="explosionsRadius" min="0.2" max="6" step="0.005" value="1.0">
     </div>
     <div class="control-row">
       <label>Depth</label>
@@ -832,6 +832,26 @@
     <div class="control-row">
       <label>Scorch spikes</label>
       <input type="range" id="explosionsScorchSpikes" min="0" max="1" step="0.01" value="0.65">
+    </div>
+    <div class="control-row">
+      <label>Scorch material</label>
+      <input type="range" id="explosionsScorchEnabled" min="0" max="1" step="1" value="1">
+    </div>
+    <div class="control-row">
+      <label>Decals</label>
+      <input type="range" id="explosionsDecalEnabled" min="0" max="1" step="1" value="1">
+    </div>
+    <div class="control-row">
+      <label>Decal glow</label>
+      <input type="range" id="explosionsDecalGlow" min="0" max="2" step="0.01" value="0.6">
+    </div>
+    <div class="control-row">
+      <label>Decal tint</label>
+      <input type="range" id="explosionsDecalTint" min="0" max="1" step="0.01" value="0.65">
+    </div>
+    <div class="control-row">
+      <label>Decal normal</label>
+      <input type="range" id="explosionsDecalNormal" min="0" max="2" step="0.01" value="0.6">
     </div>
     <div class="preset-btns">
       <button class="preset-btn" id="btn-reset-explosions">Reset Terrain</button>
@@ -1003,17 +1023,30 @@ const STATE = {
   },
   explosions: {
     enabled: true,          // click-to-explode while this is on
-    radius: 0.885,          // world-space crater radius
+    radius: 1.0,            // world-space crater radius
     depth: 0.20,            // world-unit peak depth of a single crater (accumulated additively)
     depthFalloff: 1.0,      // exponent on the crater profile (>1 = wider flat floor + steeper rim, <1 = softer cone)
     rimHeight: 0.35,        // raised rim as fraction of crater depth (0 = pure dent, 0.5 = prominent ring of upthrust)
     scorchBoost: 0.66,      // scorch radius as fraction of crater radius
     scorchFalloff: 1.0,     // exponent on the scorch falloff curve (>1 = sharper edge)
-    scorchSpikes: 0.65      // 0 = round scorch, 1 = strong radial rays/spikes (crater stays round either way)
+    scorchSpikes: 0.65,     // 0 = round scorch, 1 = strong radial rays/spikes (crater stays round either way)
+    scorchEnabled: true,    // paint the dark damage material on top of the scorched footprint
+    decalEnabled: true,     // composite the BAR ground-crack decal on each blast
+    decalGlow: 0.6,         // master glow multiplier for the decal _n alpha channel
+    decalTint: 0.65,        // 0 = leave underlying ground albedo, 1 = full BAR-style 2× tint
+    decalNormalStr: 0.6     // how much the decal _n RGB perturbs the terrain surface normal
   }
 };
 
 const MAX_LAYERS = 8;
+
+// Maximum number of crater decals composited into the terrain shader at
+// once. Each decal is two texture samples + a fast AABB reject per
+// pixel; pixels outside every decal's footprint hit only the cheap
+// reject path, so this budget scales with on-screen decal coverage
+// (similar to a deferred decal pass) rather than total count. Older
+// decals get recycled when the buffer fills.
+const MAX_DECALS = 128;
 
 // ═══════════════════════════════════════════════════════════════════════
 //  VERTEX SHADER — unchanged math, slope-normal scaled by world size
@@ -1192,12 +1225,16 @@ const vertexShader = `
 //   - A sampler uniform trio per *unique* material used (dedupe across layers)
 //   - A fetch block for each layer that early-outs on zero weight
 function buildFragmentShader(state) {
-  // Collect unique materials referenced by base + layers. 'damage' is
-  // always compiled in so the explosion overlay has something to sample.
+  // Collect unique materials referenced by base + layers. The 'damage'
+  // material is only compiled in when the scorch overlay is enabled —
+  // skipping it saves a sampler trio + a triplanar tap set when the
+  // user has the toggle off. The overlay block below also has to be
+  // omitted to avoid referencing sample_damage when it isn't emitted.
+  const scorchOn = state.explosions?.scorchEnabled !== false;
   const usedMats = new Set();
   usedMats.add(state.baseLayer.material);
   for (const l of state.layers) usedMats.add(l.material);
-  usedMats.add('damage');
+  if (scorchOn) usedMats.add('damage');
   const matList = [...usedMats];
 
   // Sampler + tunable uniforms per material
@@ -1510,6 +1547,40 @@ function buildFragmentShader(state) {
   uniform sampler2D uDamageMask;
   uniform float     uDamageEnabled;
 
+  // Crater decals — up to MAX_DECALS oriented quads composited on top of
+  // the terrain albedo. Channel layout matches BAR's GL4 decal system:
+  //   uDecalAlbedo: RGB albedo (×2× tint), A = decal opacity mask
+  //   uDecalNormal: RGB tangent-space normal (unused here for now), A = glow mask
+  // Per-decal state packed into parallel arrays:
+  //   uDecalParams[i].xy = world-XZ centre
+  //   uDecalParams[i].z  = world-space radius (the decal occupies a
+  //                        2*radius square centred on .xy)
+  //   uDecalParams[i].w  = rotation angle in radians (orientation jitter
+  //                        so repeats don't look identical)
+  //   uDecalFade[i]      = fade multiplier (0..1, drops as the decal ages)
+  uniform sampler2D uDecalAlbedo;
+  uniform sampler2D uDecalNormal;
+  uniform float     uDecalEnabled;
+  uniform int       uDecalCount;
+  // Per-decal data, packed into parallel arrays. Each decal is an
+  // ORIENTED box anchored to the surface normal at its impact point —
+  // not a flat-down projection — so cliff-face hits don't get smeared.
+  // Layout per decal:
+  //   uDecalCentre[i].xyz = world-space hit position
+  //   uDecalCentre[i].w   = invRadius (= 1.0 / radius)
+  //   uDecalT[i].xyz      = tangent axis (already rotated by random angle)
+  //   uDecalB[i].xyz      = bitangent axis (orthonormal with T, perpendicular to N)
+  //   uDecalFade[i].x     = albedo fade, .y = glow fade
+  // Normal is implicit: N = cross(B, T) if needed, but the projection
+  // math doesn't actually require it — the box is defined by T and B.
+  uniform vec4      uDecalCentre[${MAX_DECALS}];
+  uniform vec3      uDecalT[${MAX_DECALS}];
+  uniform vec3      uDecalB[${MAX_DECALS}];
+  uniform vec2      uDecalFade[${MAX_DECALS}];
+  uniform float     uDecalGlow;        // master glow multiplier (slider)
+  uniform float     uDecalTint;        // 0..1 — 0 leaves underlying ground unchanged, 1 = full BAR-style 2× tint
+  uniform float     uDecalNormalStr;   // 0..1+ — how much the decal _n RGB perturbs the terrain surface normal
+
   // Topographic contour lines
   uniform float uTopoEnabled;
   uniform float uTopoSpacing;
@@ -1745,6 +1816,10 @@ ${layerBlocks}
     // footprint, paint the dedicated damage material on top of what's left.
     // The result is: rock/cliff on the crater walls and scorched material
     // over them, with grass/snow/sand fully erased inside the blast radius.
+    // Build-time gated: when the scorch toggle is off the 'damage' material
+    // isn't compiled in at all, so this whole block is omitted (no sampler,
+    // no triplanar taps). Organic layer erase via damageScorch still works.
+${scorchOn ? `
     if (damageScorch > 0.001) {
       vec3 dAlb; vec3 dNrm; float dRgh; float dSpc;
       sample_damage(vWorldPos, geoNormal, blendWeights, scale, dAlb, dNrm, dRgh, dSpc);
@@ -1753,6 +1828,101 @@ ${layerBlocks}
       normalAcc = mix(normalAcc, dNrm, m);
       roughAcc  = mix(roughAcc, dRgh, m);
       specAcc   = mix(specAcc, dSpc, m);
+    }` : ''}
+
+    // ── Crater decals ──
+    // Each active decal is an oriented square in world-XZ centred on
+    // uDecalParams[i].xy with side length 2*z and rotated by .w. We
+    // transform vWorldPos.xz into the decal's local frame, derive UVs,
+    // sample albedo (RGB×2×tint, A=opacity) and normal (A=glow), then
+    // alpha-blend albedo over the lit ground colour and accumulate glow
+    // into glowAcc (added after lighting so it stays bright in shadow).
+    vec3 glowAcc = vec3(0.0);
+    if (uDecalEnabled > 0.5) {
+      // Loop bound is constant (WebGL1 GLSL requirement). Each iteration
+      // does:
+      //   1. Two array reads (params + rot) and a fast scalar AABB test
+      //      against the ROTATED footprint — no trig, no length(), one
+      //      multiply per axis.
+      //   2. If outside the box: 'continue' — texture samples and the
+      //      whole albedo/glow/normal stack are skipped. Drivers can
+      //      hoist sampler reads out of branches, but only if the result
+      //      is actually used downstream; here every dependent value is
+      //      gated, so the reads collapse on out-of-box pixels.
+      //   3. If inside: sample, blend, perturb.
+      // This keeps per-pixel cost roughly O(decals visible at this pixel)
+      // instead of O(MAX_DECALS), so big caps cost nothing on terrain
+      // pixels with no nearby decals.
+      for (int i = 0; i < ${MAX_DECALS}; i++) {
+        if (i >= uDecalCount) break;
+        vec4 dc = uDecalCentre[i];
+        vec2 fades = uDecalFade[i];
+        if (fades.x <= 0.001 && fades.y <= 0.001) continue;
+
+        // Project the world-space delta onto the decal's tangent frame.
+        // dot(delta, T) gives the local U axis, dot(delta, B) the V axis,
+        // dot(delta, N) is depth along the decal plane — used to reject
+        // and softly fade pixels that lie above/below the impact surface.
+        // dc.w is invRadius.
+        vec3 T = uDecalT[i];
+        vec3 B = uDecalB[i];
+        vec3 N = cross(T, B);
+        vec3 delta = vWorldPos - dc.xyz;
+        float lu = dot(delta, T) * dc.w;
+        float lv = dot(delta, B) * dc.w;
+        float ln = dot(delta, N) * dc.w;
+        // Oriented-box reject: ±1 along T and B (tangent square), and
+        // ±0.7 slab along N — generous enough to keep curved cliff
+        // faces visible, tight enough to cull a different mountain.
+        if (abs(lu) > 1.0 || abs(lv) > 1.0 || abs(ln) > 0.7) continue;
+        // Smooth fade inside the slab so the decal tapers off cleanly
+        // when the surface curves out of the projection volume.
+        float slabFade = 1.0 - smoothstep(0.3, 0.7, abs(ln));
+        // Surface-normal mismatch fade: cull only when the fragment's
+        // terrain normal points away from the decal's anchor normal by
+        // more than ~90° (dot < 0). Soft fade between 0 and 0.5 means
+        // perpendicular surfaces drop out but matching/curving ones
+        // stay at full strength — even when the heightmap-sampled
+        // anchor normal disagrees a bit with the displaced mesh normal.
+        float normalAlign = smoothstep(0.0, 0.5, max(dot(geoNormal, N), 0.0));
+
+        // Inside the box — do the expensive work now.
+        vec2 nld = vec2(lu, lv);
+        vec2 uv  = nld * 0.5 + 0.5;
+        vec4 alb = texture2D(uDecalAlbedo, uv);
+        vec4 nrm = texture2D(uDecalNormal, uv);
+
+        // Soft circular falloff inside the square so the decal blends
+        // away at its edges instead of showing a sharp corner.
+        float rd   = length(nld);
+        float edge = 1.0 - smoothstep(0.85, 1.0, rd);
+        // No slope reject anymore — the oriented projection wraps the
+        // decal onto the actual surface. Slab fade keeps it confined to
+        // the impacted face so it doesn't bleed onto distant terrain.
+        float a = clamp(pow(alb.a, 0.55) * 1.4, 0.0, 1.0) * edge * fades.x * slabFade * normalAlign;
+
+        // Albedo: multiply (darken) the underlying ground, scaled by
+        // the user's tint slider. tint=0 → unchanged, tint=1 → full
+        // multiply onto the dark crack texture.
+        vec3 darken = mix(vec3(1.0), alb.rgb, uDecalTint);
+        albedo = mix(albedo, albedo * darken, a);
+
+        // Glow: normal-map alpha is the emissive mask. Per-decal glow
+        // fade so each crater cools on its own timeline.
+        float glowMask = clamp(pow(alb.a, 0.55) * 1.4, 0.0, 1.0) * edge * fades.y * slabFade * normalAlign;
+        glowAcc += vec3(1.0, 0.45, 0.12) * nrm.a * glowMask * uDecalGlow;
+
+        // Normal-map perturbation. The decal's tangent-space normal
+        // unpacks to (tn.x, tn.y, tn.z); we transform it into world
+        // space using the decal's tangent frame: x → T, y → B, z → N.
+        // N is reconstructed via cross(T, B) since it's not stored.
+        if (uDecalNormalStr > 0.001) {
+          vec3 tn = nrm.rgb * 2.0 - 1.0;
+          vec3 N  = cross(T, B);
+          vec3 worldDecalN = normalize(tn.x * T + tn.y * B + max(tn.z, 0.0) * N);
+          normalAcc = normalize(mix(normalAcc, worldDecalN, a * uDecalNormalStr));
+        }
+      }
     }
 
     vec3 normal = normalize(normalAcc);
@@ -1952,6 +2122,9 @@ ${layerBlocks}
     float ao = smoothstep(0.0, 0.7, vHeight01) * 0.5 + 0.5;
 
     vec3 color = albedo * lighting * ao + specular;
+    // Decal glow stays bright in shadow — added after the lighting pass
+    // so it reads as emission rather than reflected light.
+    color += glowAcc;
 
     float rim = 1.0 - max(dot(viewDir, normal), 0.0);
     color += pow(rim, 4.0) * vec3(0.15, 0.25, 0.4) * uRimStrength;
@@ -2014,6 +2187,17 @@ for (const m of Object.values(MATERIAL_LIBRARY)) {
   getTexture(m.rough);
 }
 
+// Crater decal textures (BAR GL4 layout):
+//   _a: RGB albedo (×2× tint when composited), A = decal opacity
+//   _n: RGB tangent normal (currently unused — could perturb the surface
+//       normal in a future revision), A = glow / emission mask
+const decalAlbedoTex = getTexture('textures/decals/T_GroundCrack_09_a.png', { srgb: true });
+const decalNormalTex = getTexture('textures/decals/T_GroundCrack_09_n.png');
+// Override the default repeat wrap — decals are projected, not tiled,
+// so sampling outside [0..1] should return transparent edge texels.
+decalAlbedoTex.wrapS = decalAlbedoTex.wrapT = THREE.ClampToEdgeWrapping;
+decalNormalTex.wrapS = decalNormalTex.wrapT = THREE.ClampToEdgeWrapping;
+
 // ═══════════════════════════════════════════════════════════════════════
 //  SHARED UNIFORMS (not layer-specific)
 // ═══════════════════════════════════════════════════════════════════════
@@ -2038,6 +2222,27 @@ const sharedUniforms = {
   uFlashColor:      { value: new THREE.Vector3() },
   uFlashIntensity:  { value: 0.0 },
   uFlashRadius:     { value: 1.0 },
+  // Crater decal arrays — populated each frame from activeDecals[].
+  // Length must match MAX_DECALS in the shader; pre-allocate so we don't
+  // realloc on every frame.
+  uDecalAlbedo:     { value: null },
+  uDecalNormal:     { value: null },
+  uDecalEnabled:    { value: 1.0 },
+  uDecalCount:      { value: 0 },
+  // .xyz = world-space hit position, .w = invRadius
+  uDecalCentre:     { value: Array.from({ length: MAX_DECALS }, () => new THREE.Vector4()) },
+  // .xyz = tangent / bitangent axes, anchored to the surface normal at
+  // spawn time and pre-rotated by a random angle so repeated decals
+  // don't look identical.
+  uDecalT:          { value: Array.from({ length: MAX_DECALS }, () => new THREE.Vector3(1, 0, 0)) },
+  uDecalB:          { value: Array.from({ length: MAX_DECALS }, () => new THREE.Vector3(0, 0, 1)) },
+  // Each Vector2 stores the per-decal albedo fade (.x) and glow ember
+  // fade (.y). Per-decal glow timeline so a fresh blast can't re-ignite
+  // older decals — each one cools on its own clock.
+  uDecalFade:       { value: Array.from({ length: MAX_DECALS }, () => new THREE.Vector2()) },
+  uDecalGlow:       { value: 0.6 },
+  uDecalTint:       { value: 0.65 },
+  uDecalNormalStr:  { value: 0.6 },
 
   // Shadow mapping — bound to DirectionalLight.shadow after scene setup.
   uShadowMap:        { value: null },
@@ -2082,6 +2287,10 @@ const sharedUniforms = {
   // xy = slope min/max (0..1), zw = height01 min/max
   uTopoRange:    { value: new THREE.Vector4(0.0, 1.0, 0.0, 1.0) }
 };
+// Bind the decal textures into the shared uniform set now that both the
+// textures and the uniforms object exist.
+sharedUniforms.uDecalAlbedo.value = decalAlbedoTex;
+sharedUniforms.uDecalNormal.value = decalNormalTex;
 
 // ═══════════════════════════════════════════════════════════════════════
 //  GEOMETRY / MATERIAL REBUILD
@@ -2929,6 +3138,30 @@ function sampleTerrainY(wx, wz) {
     h -= crater * sharedUniforms.uDamageMaxDepth.value;
   }
   return h;
+}
+
+// Surface normal at a world-XZ point via central differences against the
+// displaced terrain. Used by decal spawning so each crater gets oriented
+// to the slope it landed on. Step size scales with one heightmap texel
+// world-distance so the normal matches what the shader's finite-diff
+// produces (without going so small that bilinear noise dominates).
+function computeTerrainNormal(wx, wz) {
+  let step = 0.05;
+  if (lastHeightmapInfo) {
+    const wpt = STATE.worldSize / Math.max(lastHeightmapInfo.width, lastHeightmapInfo.height);
+    step = Math.max(wpt * 1.0, 0.04);
+  }
+  const hL = sampleTerrainY(wx - step, wz);
+  const hR = sampleTerrainY(wx + step, wz);
+  const hD = sampleTerrainY(wx, wz - step);
+  const hU = sampleTerrainY(wx, wz + step);
+  // Match the shader's tangent convention: +X tangent runs +X, +Z direction
+  // tangent runs -Z (because UV y → -world Z). cross gives +Y up on flat.
+  const tX = new THREE.Vector3(2 * step, hR - hL, 0);
+  const tZ = new THREE.Vector3(0, hU - hD, -2 * step);
+  const n = new THREE.Vector3().crossVectors(tX, tZ).normalize();
+  if (n.y < 0) n.multiplyScalar(-1);
+  return n;
 }
 
 // Raymarch from the camera through the click direction, stepping along the
@@ -3782,6 +4015,133 @@ function spawnFlash(wx, wy, wz, radius) {
   slot.ring.visible = true;
 }
 
+// ── Crater decals ──
+// Each entry corresponds to one slot in the shader's uniform arrays.
+// alive=false slots are reused before allocation grows the active set;
+// when all slots are alive we recycle the oldest. Decals fade in on
+// spawn and fade out at the end of life so the on/off transition isn't
+// jarring. The 'glow' channel naturally fades faster (driven by age).
+const DECAL_LIFE       = 30.0;   // total seconds before a decal fully fades
+const DECAL_FADE_IN    = 0.25;   // seconds to bloom up to full alpha
+const DECAL_FADE_OUT   = 6.0;    // seconds of fade-out at the tail
+const DECAL_GLOW_LIFE  = 4.5;    // glow ember-fades within this window
+const activeDecals = [];
+for (let i = 0; i < MAX_DECALS; i++) {
+  activeDecals.push({
+    alive: false, age: 0,
+    x: 0, y: 0, z: 0,
+    radius: 1, invRadius: 1,
+    // Tangent / bitangent / normal at the impact point — anchor for the
+    // oriented projection box. Defaults are a flat ground frame.
+    tx: 1, ty: 0, tz: 0,
+    bx: 0, by: 0, bz: 1,
+    nx: 0, ny: 1, nz: 0
+  });
+}
+
+// Helpers reused across spawnDecal calls so we don't allocate every click.
+const _decalNormalTmp = new THREE.Vector3();
+const _decalTangentTmp = new THREE.Vector3();
+const _decalBitangentTmp = new THREE.Vector3();
+const _decalUpY = new THREE.Vector3(0, 1, 0);
+const _decalUpZ = new THREE.Vector3(0, 0, 1);
+function spawnDecal(wx, wy, wz, radius) {
+  // Find a free slot, or recycle the oldest live one.
+  let slot = activeDecals.find(d => !d.alive);
+  if (!slot) {
+    slot = activeDecals[0];
+    for (const d of activeDecals) if (d.age > slot.age) slot = d;
+  }
+  slot.alive  = true;
+  slot.age    = 0;
+  slot.x      = wx;
+  slot.y      = wy;
+  slot.z      = wz;
+  // Tuned down from earlier sizes — keeps the decal close to the actual
+  // crater footprint instead of bleeding out into surroundings.
+  slot.radius = radius * 0.9;
+  slot.invRadius = 1.0 / slot.radius;
+
+  // Sample the surface normal at the impact point and build a tangent
+  // frame (T, B, N) anchored to it. T is constructed from world +X
+  // projected onto the plane perpendicular to N, then orthonormalised.
+  // This avoids the up-reference flipping issue when N transitions
+  // between ~horizontal and ~vertical slopes — the frame stays
+  // continuous because we use a single stable reference axis.
+  const n = computeTerrainNormal(wx, wz);
+  // Pick the world axis least parallel to N as the reference for T.
+  // Using the smallest component of |N| means cross(N, ref) is never
+  // close to zero, so T is well-defined for any slope.
+  const ax = Math.abs(n.x), ay = Math.abs(n.y), az = Math.abs(n.z);
+  let refX = 0, refY = 0, refZ = 0;
+  if (ax < ay && ax < az) refX = 1;
+  else if (ay < az)        refY = 1;
+  else                     refZ = 1;
+  // T = normalize(ref - N*(N·ref))   (Gram-Schmidt: ref minus its N component)
+  const dotNR = n.x * refX + n.y * refY + n.z * refZ;
+  let tx = refX - n.x * dotNR;
+  let ty = refY - n.y * dotNR;
+  let tz = refZ - n.z * dotNR;
+  const tLen = Math.hypot(tx, ty, tz) || 1;
+  tx /= tLen; ty /= tLen; tz /= tLen;
+  // B = N × T  — completes the right-handed frame.
+  const bx = n.y * tz - n.z * ty;
+  const by = n.z * tx - n.x * tz;
+  const bz = n.x * ty - n.y * tx;
+
+  // Random rotation around N so repeated decals don't look identical.
+  // Pre-rotate T and B by (cos, sin) so the shader stores the final axes.
+  const a = Math.random() * Math.PI * 2;
+  const cs = Math.cos(a);
+  const sn = Math.sin(a);
+  slot.tx =  tx * cs + bx * sn;
+  slot.ty =  ty * cs + by * sn;
+  slot.tz =  tz * cs + bz * sn;
+  slot.bx = -tx * sn + bx * cs;
+  slot.by = -ty * sn + by * cs;
+  slot.bz = -tz * sn + bz * cs;
+  slot.nx = n.x; slot.ny = n.y; slot.nz = n.z;
+}
+
+function updateDecals(dt) {
+  let count = 0;
+  for (const d of activeDecals) {
+    if (!d.alive) continue;
+    d.age += dt;
+    if (d.age >= DECAL_LIFE) {
+      d.alive = false;
+      continue;
+    }
+    // Albedo envelope: fade in fast, hold, fade out at the tail.
+    const fadeIn  = Math.min(1, d.age / DECAL_FADE_IN);
+    const fadeOut = d.age > DECAL_LIFE - DECAL_FADE_OUT
+      ? (DECAL_LIFE - d.age) / DECAL_FADE_OUT
+      : 1;
+    const fade = Math.max(0, Math.min(1, fadeIn * fadeOut));
+    // Glow envelope: per-decal ember cooldown on its OWN clock — so a
+    // fresh blast can't re-ignite older craters. Same fade-in shape as
+    // albedo so the embers don't pop.
+    const glowFade = d.age < DECAL_GLOW_LIFE
+      ? fadeIn * Math.pow(1 - d.age / DECAL_GLOW_LIFE, 1.4)
+      : 0;
+    if (fade <= 0.001 && glowFade <= 0.001) continue;
+
+    const slotIdx = count;
+    // Centre packs world-space XYZ + invRadius. Tangent frame goes into
+    // the parallel T/B arrays (precomputed at spawn).
+    sharedUniforms.uDecalCentre.value[slotIdx].set(d.x, d.y, d.z, d.invRadius);
+    sharedUniforms.uDecalT.value[slotIdx].set(d.tx, d.ty, d.tz);
+    sharedUniforms.uDecalB.value[slotIdx].set(d.bx, d.by, d.bz);
+    sharedUniforms.uDecalFade.value[slotIdx].set(fade, glowFade);
+    count++;
+    if (count >= MAX_DECALS) break;
+  }
+  sharedUniforms.uDecalCount.value = count;
+  // uDecalGlow is now just the user's slider — per-decal envelope is
+  // baked into uDecalFade.y so each crater cools independently.
+  sharedUniforms.uDecalGlow.value = (STATE.explosions?.decalGlow ?? 0.6) * 3.2;
+}
+
 // Three colour stops (RGB) blended over normalized age — bright white
 // flash → warm orange → deep red smoke. Matches the BAR fireball look.
 const FLASH_COL_HOT  = new THREE.Color(1.0, 0.95, 0.75);
@@ -4138,8 +4498,35 @@ document.getElementById('explosionsScorchFalloff').addEventListener('input', e =
 document.getElementById('explosionsScorchSpikes').addEventListener('input', e => {
   STATE.explosions.scorchSpikes = parseFloat(e.target.value);
 });
+document.getElementById('explosionsScorchEnabled').addEventListener('input', e => {
+  const on = parseFloat(e.target.value) > 0.5;
+  if (on === STATE.explosions.scorchEnabled) return;
+  STATE.explosions.scorchEnabled = on;
+  // Toggle decides whether the 'damage' material is compiled in, so a
+  // shader rebuild is required to drop/restore its sampler + tap set.
+  rebuildMaterial();
+});
+document.getElementById('explosionsDecalEnabled').addEventListener('input', e => {
+  const on = parseFloat(e.target.value) > 0.5;
+  STATE.explosions.decalEnabled = on;
+  sharedUniforms.uDecalEnabled.value = on ? 1.0 : 0.0;
+});
+document.getElementById('explosionsDecalGlow').addEventListener('input', e => {
+  STATE.explosions.decalGlow = parseFloat(e.target.value);
+});
+document.getElementById('explosionsDecalTint').addEventListener('input', e => {
+  STATE.explosions.decalTint = parseFloat(e.target.value);
+  sharedUniforms.uDecalTint.value = STATE.explosions.decalTint;
+});
+document.getElementById('explosionsDecalNormal').addEventListener('input', e => {
+  STATE.explosions.decalNormalStr = parseFloat(e.target.value);
+  sharedUniforms.uDecalNormalStr.value = STATE.explosions.decalNormalStr;
+});
 document.getElementById('btn-reset-explosions').addEventListener('click', () => {
   resetDamageMask();
+  // Also clear any active crater decals so the reset is visually total.
+  for (const d of activeDecals) d.alive = false;
+  sharedUniforms.uDecalCount.value = 0;
 });
 
 // Turn a mouse click into a world-space hit on the displaced terrain. We
@@ -4178,6 +4565,7 @@ renderer.domElement.addEventListener('pointerup', e => {
   paintExplosion(hit.x, hit.z, STATE.explosions.radius);
   spawnDebris(hit.x, hit.y, hit.z, STATE.explosions.radius);
   spawnFlash(hit.x, hit.y, hit.z, STATE.explosions.radius);
+  spawnDecal(hit.x, hit.y, hit.z, STATE.explosions.radius);
 });
 
 // Lighting group
@@ -4520,10 +4908,15 @@ function applyConfig(cfg) {
     buildWater();
   }
 
-  // Explosion tunables — no rebuild needed, values get snapshotted on
-  // the next paintExplosion() call.
+  // Explosion tunables — most values get snapshotted on the next
+  // paintExplosion() call, but the scorch-material toggle decides
+  // whether the 'damage' material is compiled in, so a rebuild is
+  // required when it flips.
   if (cfg.explosions) {
+    const prevScorch = STATE.explosions.scorchEnabled !== false;
     Object.assign(STATE.explosions, cfg.explosions);
+    const newScorch = STATE.explosions.scorchEnabled !== false;
+    if (prevScorch !== newScorch) rebuildMaterial();
   }
 
   // Per-material tunables — write back to MATERIAL_LIBRARY and live uniforms
@@ -4622,6 +5015,16 @@ function syncSlidersFromState() {
   set('explosionsScorchExt',      STATE.explosions.scorchBoost);
   set('explosionsScorchFalloff',  STATE.explosions.scorchFalloff);
   set('explosionsScorchSpikes',   STATE.explosions.scorchSpikes);
+  set('explosionsScorchEnabled',  STATE.explosions.scorchEnabled === false ? 0 : 1);
+  set('explosionsDecalEnabled',   STATE.explosions.decalEnabled === false ? 0 : 1);
+  set('explosionsDecalGlow',      STATE.explosions.decalGlow);
+  set('explosionsDecalTint',      STATE.explosions.decalTint);
+  set('explosionsDecalNormal',    STATE.explosions.decalNormalStr);
+  // Decal toggle/tint/normal flow through live uniforms (no rebuild
+  // needed), so push them into the shader after a config load.
+  sharedUniforms.uDecalEnabled.value   = STATE.explosions.decalEnabled === false ? 0.0 : 1.0;
+  sharedUniforms.uDecalTint.value      = STATE.explosions.decalTint      ?? 0.65;
+  sharedUniforms.uDecalNormalStr.value = STATE.explosions.decalNormalStr ?? 0.6;
 }
 
 function saveConfigToFile() {
@@ -5369,6 +5772,7 @@ function animate(now) {
   updateActiveBlasts(dt);
   updateDebris(dt);
   updateFlashes(dt);
+  updateDecals(dt);
 
   // Keep the sun pointing from uSunDir, scaled to sit outside the terrain.
   const sd = sharedUniforms.uSunDir.value;
