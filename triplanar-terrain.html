@@ -1479,6 +1479,13 @@ function buildFragmentShader(state) {
   uniform float uBaseBrightness;
   uniform float uAmbientStrength;
   uniform float uSunStrength;
+  // Explosion flash light: drives a soft point-light highlight on the
+  // terrain so a blast lights up the surrounding ground. Intensity is 0
+  // when no flash is alive — the term short-circuits to nothing then.
+  uniform vec3  uFlashPos;
+  uniform vec3  uFlashColor;
+  uniform float uFlashIntensity;
+  uniform float uFlashRadius;
   uniform float uRimStrength;
   uniform float uSpecular;
 
@@ -1914,6 +1921,26 @@ ${layerBlocks}
     float diffuseTerm = max(NdotL, NdotLgeo * 0.15);
     vec3 lighting = ambient * uAmbientStrength + warmLight * diffuseTerm * shadow * uSunStrength;
 
+    // ── Explosion flash contribution ──
+    // Quadratic falloff with a soft cap, plus N·L so the side of slopes
+    // facing the blast lights up more than the back. Skipped when no
+    // flash is alive (uFlashIntensity == 0). Added BEFORE tonemap so
+    // bright peaks roll off naturally with the rest of the lighting.
+    if (uFlashIntensity > 0.0) {
+      vec3  toFlash   = uFlashPos - vWorldPos;
+      float fdist     = length(toFlash);
+      float fr        = max(uFlashRadius, 0.001);
+      float att       = 1.0 - clamp(fdist / fr, 0.0, 1.0);
+      att             = att * att;                              // smooth falloff
+      vec3  flashDir  = toFlash / max(fdist, 1e-4);
+      float NdotF     = max(dot(geoNormal, flashDir), 0.0);
+      // 0.4 wrap term keeps facing-away terrain from going pitch black —
+      // a real fireball lights up everything around it, not just the
+      // surfaces with positive NdotL.
+      float wrap      = NdotF * 0.6 + 0.4;
+      lighting       += uFlashColor * uFlashIntensity * att * wrap;
+    }
+
     vec3 viewDir = normalize(cameraPosition - vWorldPos);
     vec3 halfDir = normalize(sunDir + viewDir);
     float NdotH = max(dot(normal, halfDir), 0.0);
@@ -2005,6 +2032,12 @@ const sharedUniforms = {
   uSunStrength:     { value: 1.15 },
   uRimStrength:     { value: 0.0 },
   uSpecular:        { value: 0.12 },
+  // Explosion flash. Driven from updateFlashes() — intensity is 0 when
+  // no flash is alive, otherwise tracks the brightest live flash.
+  uFlashPos:        { value: new THREE.Vector3() },
+  uFlashColor:      { value: new THREE.Vector3() },
+  uFlashIntensity:  { value: 0.0 },
+  uFlashRadius:     { value: 1.0 },
 
   // Shadow mapping — bound to DirectionalLight.shadow after scene setup.
   uShadowMap:        { value: null },
@@ -3631,6 +3664,228 @@ function updateDebris(dt) {
   if (anyAlphaChanged) debrisAlphaAttr.needsUpdate = true;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+//  FLASH / FIREBALL — BAR-style click-to-explode visual
+// ═══════════════════════════════════════════════════════════════════════
+// Each click spawns a single flash slot composed of two camera-facing
+// billboards: a bright fireball quad and a flat ground shockwave ring.
+// Both are driven by a custom additive shader that ramps colour and
+// opacity over normalized age. A shared dynamic point light tracks the
+// most recent live flash so the scene gets a brief lighting kick without
+// paying for one light per flash.
+const FLASH_POOL_SIZE = 16;
+
+// Shared geometry: a single unit quad. Each flash slot uses an instanced
+// billboard via Sprite (fireball) + a flat horizontal disc (shockwave).
+// Sprites auto-face the camera so we don't need a custom billboard shader.
+const flashFireballMat = new THREE.ShaderMaterial({
+  uniforms: { uColor: { value: new THREE.Color() }, uAlpha: { value: 0 } },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColor;
+    uniform float uAlpha;
+    varying vec2 vUv;
+    void main() {
+      // Soft circular falloff with a hot core that stays bright longer.
+      float r = length(vUv - 0.5) * 2.0;        // 0 at centre, 1 at edge
+      if (r > 1.0) discard;
+      float core = pow(1.0 - r, 1.6);            // bright peak
+      float halo = pow(1.0 - r, 0.45) * 0.35;    // soft outer glow
+      float i = (core + halo) * uAlpha;
+      gl_FragColor = vec4(uColor * i, i);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+
+const flashRingMat = new THREE.ShaderMaterial({
+  uniforms: { uColor: { value: new THREE.Color() }, uAlpha: { value: 0 }, uRing: { value: 0.0 } },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColor;
+    uniform float uAlpha;
+    uniform float uRing;     // 0..1 — fraction of disc the ring is at
+    varying vec2 vUv;
+    void main() {
+      float r = length(vUv - 0.5) * 2.0;
+      if (r > 1.0) discard;
+      // Thin bright ring at radius uRing, plus a soft inner fill that
+      // fades out behind the ring as it moves outward.
+      float ringW = 0.18;
+      float ring = smoothstep(uRing - ringW, uRing, r) * (1.0 - smoothstep(uRing, uRing + ringW, r));
+      float inner = (1.0 - smoothstep(0.0, uRing, r)) * 0.25;
+      float i = (ring + inner) * uAlpha;
+      gl_FragColor = vec4(uColor * i, i);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+
+// Per-slot meshes (one fireball plane + one ground ring). Pre-allocated.
+const flashSlots = [];
+for (let i = 0; i < FLASH_POOL_SIZE; i++) {
+  const fireballMat = flashFireballMat.clone();
+  const ringMat = flashRingMat.clone();
+  // Quad (XY plane). The fireball billboards via lookAt(camera) each frame;
+  // the ring sits flat on the ground (rotated -π/2 around X).
+  const fireball = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), fireballMat);
+  const ring = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), ringMat);
+  ring.rotation.x = -Math.PI / 2;
+  fireball.visible = false;
+  ring.visible = false;
+  fireball.frustumCulled = false;
+  ring.frustumCulled = false;
+  scene.add(fireball);
+  scene.add(ring);
+  flashSlots.push({
+    alive: false,
+    age: 0,
+    life: 0.55,        // total seconds the flash lives
+    radius: 1.0,       // peak fireball radius (matches blast radius)
+    pos: new THREE.Vector3(),
+    fireball, ring,
+    fireballMat, ringMat
+  });
+}
+
+// Shared dynamic point light. Cheap — only one PointLight in the scene
+// regardless of how many flashes fire. We retarget it to the brightest
+// live flash each frame, so the scene gets an actual lighting kick.
+const flashLight = new THREE.PointLight(0xffaa55, 0.0, 30, 2.0);
+flashLight.castShadow = false;
+scene.add(flashLight);
+
+function spawnFlash(wx, wy, wz, radius) {
+  const slot = flashSlots.find(s => !s.alive) || flashSlots[0];
+  slot.alive = true;
+  slot.age = 0;
+  slot.life = 0.55;
+  slot.radius = radius;
+  slot.pos.set(wx, wy, wz);
+  slot.fireball.visible = true;
+  slot.ring.visible = true;
+}
+
+// Three colour stops (RGB) blended over normalized age — bright white
+// flash → warm orange → deep red smoke. Matches the BAR fireball look.
+const FLASH_COL_HOT  = new THREE.Color(1.0, 0.95, 0.75);
+const FLASH_COL_MID  = new THREE.Color(1.0, 0.55, 0.18);
+const FLASH_COL_LATE = new THREE.Color(0.55, 0.12, 0.05);
+const FLASH_TMP_COL  = new THREE.Color();
+
+// Fireball loopt korter dan de hele flash-slot (de shockwave en het
+// terrein-licht moeten nog even doorlopen nadat de centrale vuurbal
+// is uitgedoofd).
+const FLASH_FIREBALL_LIFE = 0.32;
+
+function updateFlashes(dt) {
+  let brightestI = 0;
+  let brightestSlot = null;
+  for (const s of flashSlots) {
+    if (!s.alive) continue;
+    s.age += dt;
+    const t = s.age / s.life;
+    if (t >= 1) {
+      s.alive = false;
+      s.fireball.visible = false;
+      s.ring.visible = false;
+      continue;
+    }
+
+    // Fireball gebruikt z'n eigen kortere tijdlijn — knipperen weg na
+    // FLASH_FIREBALL_LIFE seconden, los van slot.life.
+    const fbT = Math.min(1, s.age / FLASH_FIREBALL_LIFE);
+    const fbDone = fbT >= 1;
+    if (fbDone) {
+      s.fireball.visible = false;
+    }
+
+    // Fireball: snap-grow in the first ~12% of fireball life, hold, then fade.
+    // Size peaks slightly larger than the crater radius so it visually
+    // engulfs the rim like in BAR.
+    const grow  = Math.min(1, fbT / 0.12);
+    const fbSize = s.radius * 2.4 * (0.4 + 0.6 * Math.pow(grow, 0.5));
+    s.fireball.scale.set(fbSize, fbSize, 1);
+    // Billboard: quad faces the camera each frame.
+    s.fireball.position.copy(s.pos);
+    // Centre of the fireball sits at terrain level so the bottom half
+    // hugs the ground instead of floating above the crater.
+    s.fireball.lookAt(camera.position);
+
+    // Colour ramp: hot → mid → late.
+    if (fbT < 0.35) {
+      const u = fbT / 0.35;
+      FLASH_TMP_COL.copy(FLASH_COL_HOT).lerp(FLASH_COL_MID, u);
+    } else {
+      const u = (fbT - 0.35) / 0.65;
+      FLASH_TMP_COL.copy(FLASH_COL_MID).lerp(FLASH_COL_LATE, u);
+    }
+    s.fireballMat.uniforms.uColor.value.copy(FLASH_TMP_COL);
+    // Alpha curve: punch in fast, hold, then ease out.
+    const alpha = fbDone ? 0 : (fbT < 0.12
+      ? Math.pow(fbT / 0.12, 0.7) * 1.6
+      : Math.pow(1 - (fbT - 0.12) / 0.88, 1.7) * 1.6);
+    s.fireballMat.uniforms.uAlpha.value = Math.max(0, Math.min(2.5, alpha));
+
+    // Ground shockwave: expands from 0 to ~2.5× crater radius over ~0.55s,
+    // then fades. Ring radius runs in normalized [0..1] disc coords.
+    const ringT = Math.min(1, t / 0.7);
+    // Ease-out: snel groeien aan het begin, langzamer naar het einde.
+    const ringEased = 1 - Math.pow(1 - ringT, 2.2);
+    const ringSize = s.radius * 1.35 * ringEased;
+    s.ring.scale.set(ringSize, ringSize, 1);
+    s.ring.position.copy(s.pos);
+    s.ring.position.y += Math.max(0.05, s.radius * 0.08);
+    s.ringMat.uniforms.uColor.value.copy(FLASH_COL_MID);
+    s.ringMat.uniforms.uRing.value = 0.5 + ringT * 0.45;
+    s.ringMat.uniforms.uAlpha.value = (1 - ringT) * 0.9;
+
+    // Track brightest flash for the shared point light.
+    const intensity = alpha * s.radius;
+    if (intensity > brightestI) {
+      brightestI = intensity;
+      brightestSlot = s;
+    }
+  }
+
+  if (brightestSlot) {
+    flashLight.position.copy(brightestSlot.pos);
+    flashLight.color.copy(brightestSlot.fireballMat.uniforms.uColor.value);
+    // Light intensity scales with both flash brightness and crater
+    // radius so big blasts illuminate more terrain.
+    flashLight.intensity = brightestI * 4.0;
+    flashLight.distance = brightestSlot.radius * 18.0;
+    // Drive the terrain shader's flash uniforms so the ground itself
+    // lights up — Three's PointLight only affects materials with their
+    // own lighting model (debris uses MeshStandardMaterial, terrain
+    // uses a custom ShaderMaterial that ignores it).
+    sharedUniforms.uFlashPos.value.copy(brightestSlot.pos);
+    const fc = brightestSlot.fireballMat.uniforms.uColor.value;
+    sharedUniforms.uFlashColor.value.set(fc.r, fc.g, fc.b);
+    sharedUniforms.uFlashIntensity.value = brightestI * 2.6;
+    sharedUniforms.uFlashRadius.value    = brightestSlot.radius * 2.66;
+  } else {
+    flashLight.intensity = 0;
+    sharedUniforms.uFlashIntensity.value = 0;
+  }
+}
+
 function applyHeightFloat32(heightInfo) {
   const info = analyzeHeightFloat32(heightInfo);
   // Stash the raw height data alongside the metadata so the click raycaster
@@ -3922,6 +4177,7 @@ renderer.domElement.addEventListener('pointerup', e => {
   if (!hit) return;
   paintExplosion(hit.x, hit.z, STATE.explosions.radius);
   spawnDebris(hit.x, hit.y, hit.z, STATE.explosions.radius);
+  spawnFlash(hit.x, hit.y, hit.z, STATE.explosions.radius);
 });
 
 // Lighting group
@@ -5112,6 +5368,7 @@ function animate(now) {
   // Drive in-flight explosion animations and airborne debris chunks.
   updateActiveBlasts(dt);
   updateDebris(dt);
+  updateFlashes(dt);
 
   // Keep the sun pointing from uSunDir, scaled to sit outside the terrain.
   const sd = sharedUniforms.uSunDir.value;
