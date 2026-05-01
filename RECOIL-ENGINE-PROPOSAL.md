@@ -25,11 +25,10 @@ A feature proposal to evolve Recoil's terrain rendering from single-projection p
 | **5** | **"Fixed" layers** | Layers flagged `fixed` read pre-deformation height/slope, so e.g. grass can be *eroded* by a crater but never *grow back* in a fresh crater floor. | Negligible (2 extra varyings) |
 | **6** | **Surface-aligned crater decals** | Oriented projection (impact normal, not world-up) wraps decals onto cliffs and overhangs. **Additive to** Recoil's existing GL4 decal pass — no re-authoring of existing art. | +0..2 taps per visible decal |
 | **7** | **Topographic contour overlay** | World-Y isolines with normal-tilted groove walls, slope/height-gated. Sun direction picks up groove shading. | Negligible |
-| **8** | Explosion VFX (debris, fireball, shockwave, **terrain flash light**) | Mostly art/particles; flash light is the one engine-side ask (1 dynamic light contribution to the terrain shader per active blast, capped). | 1 vec3+float uniform per blast |
-| **9** | Save/load + slider-driven prototyping workflow | Mappers tune sliders in a hot-reload editor instead of painting splatmaps. | N/A (tooling) |
-| **10** | Staged rollout in 7 phases | Stages 1+2+3 deliver the core visual win; everything after is incremental. | — |
+| **8** | Save/load + slider-driven prototyping workflow | Mappers tune sliders in a hot-reload editor instead of painting splatmaps. | N/A (tooling) |
+| **9** | Staged rollout in 7 phases | Stages 1+2+3 deliver the core visual win; everything after is incremental. | — |
 
-**Performance summary** (§11, audited from `SMFFragProg.glsl`):
+**Performance summary** (§10, audited from `SMFFragProg.glsl`):
 - Recoil today, typical BAR map: **~10 taps/px**
 - Proposal, biplanar + 1 base + 4 layers, procedural only: **~25 taps/px (2.5×)**
 - Proposal, same + paint mask + color layers: **~26 taps/px (2.6×)**
@@ -310,20 +309,7 @@ For Recoil this is a natural fit for the existing `/contourLines` toggle, with t
 
 ---
 
-## 8. Explosion VFX pack (out of scope for engine, but listed for completeness)
-
-The prototype also implements:
-
-- **Tetrahedral debris** sampled from the impacted material's color texture (5 large + 15 medium + 30 small per blast, with restitution + friction + angular drag + per-instance alpha fade).
-- **Fireball billboard** snap-grown to ~2.4× crater radius, color-ramped hot-white → orange → deep-red over 0.32 s.
-- **Ground shockwave ring** expanding to ~1.35× crater radius over 0.7 s.
-- **Dynamic terrain flash light** with its own `uFlashPos / uFlashColor / uFlashIntensity / uFlashRadius` uniforms because the custom shader doesn't pick up Three's built-in `PointLight`.
-
-These are mostly art/particle-system territory rather than engine work, but the **terrain flash light** specifically is something the engine should expose to map shaders — short-lived dynamic light contributions on the terrain are visually a huge upgrade and are conceptually cheap (one extra `vec3 + float` uniform per active blast, capped at e.g. 8).
-
----
-
-## 9. Save/load and prototyping workflow
+## 8. Save/load and prototyping workflow
 
 The prototype embeds the entire material setup, layer stack, lighting, water, topo, explosion sliders, and even the heightmap and skybox bytes into a single JSON file ([triplanar-terrain.html:5040](triplanar-terrain.html#L5040), example: [colorado-test46.json](colorado-test46.json)). Forty-eight saved configs in this repo were all produced via the in-browser editor.
 
@@ -331,7 +317,7 @@ For Recoil, the natural mapping is `mapinfo.lua` for the static definition plus 
 
 ---
 
-## 10. Suggested rollout
+## 9. Suggested rollout
 
 A staged rollout that delivers user-visible value at every step and avoids a big-bang shader rewrite:
 
@@ -349,7 +335,7 @@ Stages 1, 2, and 3 deliver the core visual win. Everything after is incremental 
 
 ---
 
-## 11. Performance budget — and the elephant in the room
+## 10. Performance budget — and the elephant in the room
 
 **This is the section where this proposal asks the most of the engine team.** The prototype's per-pixel texture-fetch budget is meaningfully higher than what Recoil currently spends on terrain, and any honest evaluation of this approach has to start there.
 
@@ -426,7 +412,7 @@ These numbers do *not* include the separate ground-decal pass (`GroundDecalsFrag
 
 A few honest qualifications on those numbers:
 
-- **Layer masks don't gate texture reads at runtime.** The compile-time code-gen described in §3.3 still emits a sampler call for every layer; only layers that resolve to literal-zero contribution (e.g. a snow layer on a map below 0.4 normalized height) can be DCE'd by the GLSL compiler. In practice, in any visible terrain view at least 2-3 layers actively contribute, so **20 taps is the typical-case number for a 4-layer map, not just the worst case.**
+- **Layer masks don't gate texture reads at runtime.** The compile-time code-gen described in §3.6 still emits a sampler call for every layer; only layers that resolve to literal-zero contribution (e.g. a snow layer on a map below 0.4 normalized height) can be DCE'd by the GLSL compiler. In practice, in any visible terrain view at least 2-3 layers actively contribute, so **20 taps is the typical-case number for a 4-layer map, not just the worst case.**
 - **Bandwidth, not just count.** 20 BC7 (or DXT5) texture reads per pixel at 4K covers ~33 GB/s of GPU bandwidth before any other shader work. That's well within the budget of mid-range desktop GPUs but eats into the headroom the rest of the frame relies on.
 - **Layer count is the dominant lever.** Each additional auto-layer adds 4 taps under biplanar (or 6 under triplanar). A "premium" map running 6 layers under triplanar is **40 material taps/pixel** — at that point we are firmly in "art directors must justify each layer" territory.
 - **Recoil's 5-tap splat path partially overlaps with this proposal.** A BAR map today already pays 5 taps for the splat detail-normals (4 channels + 1 distribution). The proposed system replaces that with explicit layer materials — so the *net* increase is closer to **+15 taps over a splat-enabled BAR map** (10 → 25), not +20 over the absolute floor.
@@ -452,7 +438,7 @@ The justification has to come from the visual win (no cliff stretching, real per
 
 ---
 
-## 12. Open questions for the engine team
+## 11. Open questions for the engine team
 
 1. **Map format.** Extending `mapinfo.lua` is the obvious path. Is there appetite for the layer-stack schema described in §3, or should this go through a separate `mapinfo_terrain.lua` or `customparams.terrain.*`?
 2. **Damage-mask resolution.** 1024² is the prototype default. For BAR's largest maps (24×24, 32×32) this is too coarse — probably wants 2048² or a per-map scaling. Memory at 2048² × RG16F = 16 MB, very manageable.
@@ -461,7 +447,7 @@ The justification has to come from the visual win (no cliff stretching, real per
 
 ---
 
-## 13. References
+## 12. References
 
 - Prototype source: [triplanar-terrain.html](triplanar-terrain.html) (single file, no build step)
 - Inigo Quilez, Biplanar mapping: <https://iquilezles.org/articles/biplanar/>
