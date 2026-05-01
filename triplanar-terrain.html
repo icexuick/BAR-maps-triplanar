@@ -655,6 +655,10 @@
       <label>Blend Sharp</label>
       <input type="range" id="blendSharp" min="0.5" max="8" step="0.1" value="2">
     </div>
+    <div class="control-row" title="Frostbite-style height-based blending. Layer mask boundaries snap to the brighter texels (treated as 'higher') and away from darker ones, producing crisp interlocking transitions instead of muddy linear gradients. Zero extra texture taps. 0 = standard smoothstep, 1 = fully height-driven.">
+      <label>Height Blend</label>
+      <input type="range" id="heightBlend" min="0" max="1" step="0.01" value="0">
+    </div>
     <div class="control-row">
       <label>Fog</label>
       <input type="range" id="fogDensity" min="0" max="0.03" step="0.0005" value="0.004">
@@ -902,6 +906,15 @@
         padding: 4px 8px; border-radius: 3px; cursor: pointer;
         width: 100%;">BIPLANAR: OFF</button>
     </div>
+    <div style="margin-top: 4px;">
+      <button id="btn-sharpen-blend" title="Squared blend weights (Primozic): one extra w*=w + renormalize after the standard pow(blendWeights, sharpness). Sharper triplanar/biplanar transitions on cliffs at zero tap cost." style="
+        font-family: 'JetBrains Mono', monospace; font-size: 10px;
+        background: rgba(100, 180, 255, 0.08);
+        border: 1px solid rgba(100, 180, 255, 0.2);
+        color: rgba(160, 200, 240, 0.8);
+        padding: 4px 8px; border-radius: 3px; cursor: pointer;
+        width: 100%;">SHARPEN BLEND: OFF</button>
+    </div>
     <div class="preset-btns" style="margin-top: 8px;">
       <button class="preset-btn" id="btn-save-config">Save Config</button>
       <button class="preset-btn" id="btn-load-config">Load Config</button>
@@ -1005,6 +1018,8 @@ const STATE = {
   ],
   nextLayerId: 5,
   biplanar: false,        // use biplanar projection instead of triplanar (2 taps per texture instead of 3)
+  sharpenBlend: false,    // Primozic squared-weights tweak: extra w*=w + renormalize after the standard pow, sharper transitions on cliffs at zero tap cost
+  heightBlend: 0.0,       // global strength of luma-driven height blending (Frostbite-style) on layer mask boundaries — 0 = disabled (smoothstep only), 1 = full
   worldSize: 18,          // max dimension of terrain in scene units
   heightmapAspect: 1.0,   // width / height of loaded heightmap
   // Auto height normalization from heightmap CPU analysis.
@@ -1459,10 +1474,27 @@ function buildFragmentShader(state) {
         // Drop shadow darkens THIS layer only (so neighbouring grass stays
         // bright), highlight brightens it on the sun-facing edge.
         la *= brightLayer${idx} * lipBoost;
-        albedo    = mix(albedo, la, w);
-        normalAcc = mix(normalAcc, ln, w);
-        roughAcc  = mix(roughAcc, lr, w);
-        specAcc   = mix(specAcc, ls, w);
+
+        // ── Frostbite-style height-based blending ──
+        // Treat the sampled albedo's luma as an implicit per-texel "height":
+        // brighter texels read as higher and push the mask outward, darker
+        // texels read as lower and pull it inward. The (w*(1-w)) envelope
+        // confines the displacement to the soft transition zone — interior
+        // (w=1) and exterior (w=0) stay untouched, so this only affects the
+        // edge crispness, never the layer's footprint. Zero extra texture
+        // taps; we already have 'la' in hand.
+        // https://media.contentapi.ea.com/content/dam/eacom/frostbite/files/chapter5-andersson-terrain-rendering-in-frostbite.pdf
+        float wEff = w;
+        if (uHeightBlend > 0.001) {
+          float laLuma = dot(la, vec3(0.299, 0.587, 0.114));
+          float edgeEnv = w * (1.0 - w) * 4.0;  // peaks at 1 when w=0.5
+          wEff = clamp(w + (laLuma - 0.5) * uHeightBlend * edgeEnv, 0.0, 1.0);
+        }
+
+        albedo    = mix(albedo, la, wEff);
+        normalAcc = mix(normalAcc, ln, wEff);
+        roughAcc  = mix(roughAcc, lr, wEff);
+        specAcc   = mix(specAcc, ls, wEff);
       }
     }`;
   }).join('\n');
@@ -1507,6 +1539,7 @@ function buildFragmentShader(state) {
   uniform float uTime;
   uniform float uTexScale;
   uniform float uBlendSharpness;
+  uniform float uHeightBlend;       // global Frostbite-style height-blend strength (0 = pure smoothstep masks, 1 = fully luma-driven)
   uniform vec3  uSunDir;
   uniform vec3  uFogColor;
   uniform float uFogDensity;
@@ -1657,6 +1690,7 @@ ${layerUniforms}
     vec2 w2 = vec2(wMa, wMe);
     w2 = max(w2 - 0.5773, 0.0);
     w2 = pow(w2, vec2(uBlendSharpness));
+    ${state.sharpenBlend ? 'w2 *= w2;  // SHARPEN BLEND (Primozic): squared weights for sharper biplanar pick' : ''}
     float sum = w2.x + w2.y + 1e-5;
     return (cMa * w2.x + cMe * w2.y) / sum;
   }
@@ -1737,6 +1771,7 @@ ${layerUniforms}
     vec2 w2 = vec2(wMa, wMe);
     w2 = max(w2 - 0.5773, 0.0);
     w2 = pow(w2, vec2(uBlendSharpness));
+    ${state.sharpenBlend ? 'w2 *= w2;  // SHARPEN BLEND (Primozic): squared weights for sharper biplanar pick' : ''}
     float sum = w2.x + w2.y + 1e-5;
     return normalize((contribMa * w2.x + contribMe * w2.y) / sum);
   }
@@ -1765,6 +1800,13 @@ ${matSampleFns}
 
     // Triplanar blend weights
     vec3 blendWeights = pow(abs(geoNormal), vec3(uBlendSharpness));
+    ${state.sharpenBlend ? `
+    // SHARPEN BLEND (Primozic tweak): one extra square + renormalize after the
+    // standard pow. Visibly sharper cliff transitions at zero tap cost. Stacks
+    // multiplicatively with uBlendSharpness, so users can either crank the
+    // slider or toggle this for a "snap to dominant axis" feel.
+    // https://cprimozic.net/notes/posts/a-small-change-to-improve-triplanar-mapping/
+    blendWeights *= blendWeights;` : ''}
     blendWeights /= (blendWeights.x + blendWeights.y + blendWeights.z);
 
     float scale = 1.0 / uTexScale;
@@ -2205,6 +2247,7 @@ const sharedUniforms = {
   uTime: { value: 0 },
   uTexScale: { value: 2.5 },
   uBlendSharpness: { value: 2.0 },
+  uHeightBlend: { value: 0.0 },
   uDisplacement: { value: 2.8 },
   uSunDir: { value: new THREE.Vector3(0.6, 0.8, 0.3) },
   uFogColor: { value: new THREE.Vector3(0.55, 0.62, 0.75) },
@@ -4393,6 +4436,9 @@ document.getElementById('texScale').addEventListener('input', e => {
 document.getElementById('blendSharp').addEventListener('input', e => {
   sharedUniforms.uBlendSharpness.value = parseFloat(e.target.value);
 });
+document.getElementById('heightBlend').addEventListener('input', e => {
+  sharedUniforms.uHeightBlend.value = parseFloat(e.target.value);
+});
 document.getElementById('fogDensity').addEventListener('input', e => {
   sharedUniforms.uFogDensity.value = parseFloat(e.target.value);
 });
@@ -4806,11 +4852,14 @@ function collectConfig() {
       worldSize: STATE.worldSize,
       heightmapAspect: STATE.heightmapAspect,
       baseLayer: { ...STATE.baseLayer },
-      layers: STATE.layers.map(l => ({ ...l }))
+      layers: STATE.layers.map(l => ({ ...l })),
+      biplanar: STATE.biplanar,
+      sharpenBlend: STATE.sharpenBlend
     },
     shader: {
       texScale: u.uTexScale.value,
       blendSharp: u.uBlendSharpness.value,
+      heightBlend: u.uHeightBlend.value,
       fogDensity: u.uFogDensity.value,
       displacement: u.uDisplacement.value,
       heightScale: u.uHeightScale.value
@@ -4868,12 +4917,15 @@ function applyConfig(cfg) {
     if (typeof cfg.state.worldSize === 'number') STATE.worldSize = cfg.state.worldSize;
     if (cfg.state.baseLayer) STATE.baseLayer = { ...cfg.state.baseLayer };
     if (Array.isArray(cfg.state.layers)) STATE.layers = cfg.state.layers.map(l => ({ ...l }));
+    if (typeof cfg.state.biplanar === 'boolean') STATE.biplanar = cfg.state.biplanar;
+    if (typeof cfg.state.sharpenBlend === 'boolean') STATE.sharpenBlend = cfg.state.sharpenBlend;
   }
 
   // Shader group
   if (cfg.shader) {
     if (typeof cfg.shader.texScale === 'number')     u.uTexScale.value = cfg.shader.texScale;
     if (typeof cfg.shader.blendSharp === 'number')   u.uBlendSharpness.value = cfg.shader.blendSharp;
+    if (typeof cfg.shader.heightBlend === 'number')  u.uHeightBlend.value = cfg.shader.heightBlend;
     if (typeof cfg.shader.fogDensity === 'number')   u.uFogDensity.value = cfg.shader.fogDensity;
     if (typeof cfg.shader.displacement === 'number') u.uDisplacement.value = cfg.shader.displacement;
     if (typeof cfg.shader.heightScale === 'number')  u.uHeightScale.value = cfg.shader.heightScale;
@@ -4973,6 +5025,7 @@ function syncSlidersFromState() {
   };
   set('texScale',        u.uTexScale.value);
   set('blendSharp',      u.uBlendSharpness.value);
+  set('heightBlend',     u.uHeightBlend.value);
   set('fogDensity',      u.uFogDensity.value);
   set('displacement',    u.uDisplacement.value);
   set('heightScale',     u.uHeightScale.value);
@@ -5025,6 +5078,13 @@ function syncSlidersFromState() {
   sharedUniforms.uDecalEnabled.value   = STATE.explosions.decalEnabled === false ? 0.0 : 1.0;
   sharedUniforms.uDecalTint.value      = STATE.explosions.decalTint      ?? 0.65;
   sharedUniforms.uDecalNormalStr.value = STATE.explosions.decalNormalStr ?? 0.6;
+
+  // Sync the projection-mode toggle buttons (their text label is the only
+  // visible state for these — they don't have a slider readout).
+  const bpBtn = document.getElementById('btn-biplanar');
+  if (bpBtn) bpBtn.textContent = `BIPLANAR: ${STATE.biplanar ? 'ON' : 'OFF'}`;
+  const sbBtn = document.getElementById('btn-sharpen-blend');
+  if (sbBtn) sbBtn.textContent = `SHARPEN BLEND: ${STATE.sharpenBlend ? 'ON' : 'OFF'}`;
 }
 
 function saveConfigToFile() {
@@ -5579,6 +5639,13 @@ document.getElementById('btn-biplanar').addEventListener('click', () => {
   STATE.biplanar = !STATE.biplanar;
   document.getElementById('btn-biplanar').textContent =
     `BIPLANAR: ${STATE.biplanar ? 'ON' : 'OFF'}`;
+  rebuildMaterial();
+});
+
+document.getElementById('btn-sharpen-blend').addEventListener('click', () => {
+  STATE.sharpenBlend = !STATE.sharpenBlend;
+  document.getElementById('btn-sharpen-blend').textContent =
+    `SHARPEN BLEND: ${STATE.sharpenBlend ? 'ON' : 'OFF'}`;
   rebuildMaterial();
 });
 renderLayerPanel();
