@@ -659,6 +659,10 @@
       <label>Height Blend</label>
       <input type="range" id="heightBlend" min="0" max="1" step="0.01" value="0">
     </div>
+    <div class="control-row" title="Cheap micro-shadow / contact AO derived from screen-space luma derivatives. Darker texels get extra shadowing where the local luma gradient runs against the sun direction — i.e. dark cracks behind bright bumps. Zero texture taps, ~6 ALU. 0 = off, 1 = strong.">
+      <label>Micro Shadow</label>
+      <input type="range" id="microShadow" min="0" max="1" step="0.01" value="0">
+    </div>
     <div class="control-row">
       <label>Fog</label>
       <input type="range" id="fogDensity" min="0" max="0.03" step="0.0005" value="0.004">
@@ -768,6 +772,32 @@
     <div class="control-row">
       <label>Height max</label>
       <input type="range" id="topoHeightMax" min="-0.25" max="1.25" step="0.01" value="1">
+    </div>
+
+    <div class="group-title" title="Global snow / dust accumulation. Drives a top fixed-style layer (reads pre-damage normal so blast craters don't auto-fill with snow) gated by surface upness and world height. Reuses the 'snow' material — when disabled, no extra cost; when enabled, +1 material's worth of taps regardless of layer count.">Snow Cover</div>
+    <div class="control-row">
+      <label>Enabled</label>
+      <input type="range" id="snowEnabled" min="0" max="1" step="1" value="0">
+    </div>
+    <div class="control-row" title="Master strength. 0 = no snow, 1 = full white-out on all flat upward surfaces above the height threshold.">
+      <label>Amount</label>
+      <input type="range" id="snowAmount" min="0" max="1" step="0.01" value="0.8">
+    </div>
+    <div class="control-row" title="Normalized world height (0..1) at which snow starts accumulating. 0 = snow at sea level, 1 = snow only at peaks.">
+      <label>Height Start</label>
+      <input type="range" id="snowHeightStart" min="0" max="1" step="0.01" value="0.5">
+    </div>
+    <div class="control-row" title="Soft fade band width above Height Start (in normalized height units). Smaller = sharper snowline, larger = gradual transition.">
+      <label>Height Fade</label>
+      <input type="range" id="snowHeightFade" min="0.01" max="0.5" step="0.01" value="0.15">
+    </div>
+    <div class="control-row" title="Slope mask: snow only sticks below this slope value (0 = flat, 1 = vertical cliff). Steep cliffs stay rock-bare.">
+      <label>Slope Max</label>
+      <input type="range" id="snowSlopeMax" min="0" max="1" step="0.01" value="0.4">
+    </div>
+    <div class="control-row" title="Soft fade band width below Slope Max. Smaller = sharper slope cutoff, larger = gradual ramp.">
+      <label>Slope Fade</label>
+      <input type="range" id="snowSlopeFade" min="0.01" max="0.5" step="0.01" value="0.1">
     </div>
 
     <div class="group-title">Water</div>
@@ -1020,6 +1050,14 @@ const STATE = {
   biplanar: false,        // use biplanar projection instead of triplanar (2 taps per texture instead of 3)
   sharpenBlend: false,    // Primozic squared-weights tweak: extra w*=w + renormalize after the standard pow, sharper transitions on cliffs at zero tap cost
   heightBlend: 0.0,       // global strength of luma-driven height blending (Frostbite-style) on layer mask boundaries — 0 = disabled (smoothstep only), 1 = full
+  snowCover: {            // global snow accumulation as a top "fixed" layer — uses pre-damage normal so blast craters don't auto-fill with snow
+    enabled: false,
+    amount: 0.8,
+    heightStart: 0.5,
+    heightFade: 0.15,
+    slopeMax: 0.4,
+    slopeFade: 0.1,
+  },
   worldSize: 18,          // max dimension of terrain in scene units
   heightmapAspect: 1.0,   // width / height of loaded heightmap
   // Auto height normalization from heightmap CPU analysis.
@@ -1246,10 +1284,12 @@ function buildFragmentShader(state) {
   // user has the toggle off. The overlay block below also has to be
   // omitted to avoid referencing sample_damage when it isn't emitted.
   const scorchOn = state.explosions?.scorchEnabled !== false;
+  const snowOn = state.snowCover?.enabled === true;
   const usedMats = new Set();
   usedMats.add(state.baseLayer.material);
   for (const l of state.layers) usedMats.add(l.material);
   if (scorchOn) usedMats.add('damage');
+  if (snowOn)   usedMats.add('snow');  // global snow accumulation — see end of fragment shader
   const matList = [...usedMats];
 
   // Sampler + tunable uniforms per material
@@ -1540,6 +1580,9 @@ function buildFragmentShader(state) {
   uniform float uTexScale;
   uniform float uBlendSharpness;
   uniform float uHeightBlend;       // global Frostbite-style height-blend strength (0 = pure smoothstep masks, 1 = fully luma-driven)
+  uniform float uMicroShadow;       // global micro-shadow / contact-AO strength derived from screen-space luma derivatives
+  uniform vec4  uSnowParams;        // global snow cover: x=amount, y=heightStart, z=heightFade, w=slopeMax (only declared when snowOn)
+  uniform float uSnowSlopeFade;     // separate so we don't outgrow the vec4
   uniform vec3  uSunDir;
   uniform vec3  uFogColor;
   uniform float uFogDensity;
@@ -1853,6 +1896,33 @@ ${matSampleFns}
     // Apply auto-layers in order. Each layer blends on top with its weight.
 ${layerBlocks}
 
+    // ── Global snow accumulation ──
+    // A top-most "fixed" layer: reads the PRE-DAMAGE normal/height so a
+    // blast crater can erase snow but never spawn fresh snow inside the
+    // new crater floor (matches the §5 fixed-layer convention). Gated by
+    // surface upness (slopeOriginal ≤ uSnowParams.w) and world height
+    // (vHeight01Original ≥ uSnowParams.y, fading over uSnowParams.z).
+    // Build-time gated: snowOn=false → entire block + the 'snow' sampler
+    // are omitted, costs nothing. snowOn=true → +1 material's worth of
+    // taps, regardless of layer count.
+    // Also erodes inside damageScorch, just like organic auto-layers.
+${snowOn ? `
+    {
+      float snowH = vHeight01Original;
+      float snowS = slopeOriginal;
+      float hMask = smoothstep(uSnowParams.y, uSnowParams.y + uSnowParams.z, snowH);
+      float sMask = 1.0 - smoothstep(uSnowParams.w, uSnowParams.w + uSnowSlopeFade, snowS);
+      float wSnow = hMask * sMask * uSnowParams.x * (1.0 - damageScorch);
+      if (wSnow > 0.001) {
+        vec3 sAlb; vec3 sNrm; float sRgh; float sSpc;
+        sample_snow(vWorldPos, geoNormal, blendWeights, scale, sAlb, sNrm, sRgh, sSpc);
+        albedo    = mix(albedo, sAlb, wSnow);
+        normalAcc = mix(normalAcc, sNrm, wSnow);
+        roughAcc  = mix(roughAcc, sRgh, wSnow);
+        specAcc   = mix(specAcc, sSpc, wSnow);
+      }
+    }` : ''}
+
     // ── Scorched / damage overlay ──
     // After the organic layers are composited and erased within the damage
     // footprint, paint the dedicated damage material on top of what's left.
@@ -2037,6 +2107,43 @@ ${scorchOn ? `
           // strong shading difference.
           topoDark = lineMask * uTopoDarken * (1.0 - tWithin);
           albedo *= (1.0 - topoDark);
+        }
+      }
+    }
+
+    // ── Micro-shadow / contact AO from luma derivatives ──
+    // Cheap fake-AO: the screen-space gradient of albedo luma tells us
+    // which way the texture is "going darker". If that direction aligns
+    // with the sun's horizontal direction, this pixel is darker than its
+    // sun-facing neighbour — read as a crack/crevice in the shadow of a
+    // bump and darken further. Zero texture taps; just dFdx/dFdy on a
+    // value we already have. Bgolus "blending in detail" inspired.
+    if (uMicroShadow > 0.001) {
+      float albLuma = dot(albedo, vec3(0.299, 0.587, 0.114));
+      vec2 lumaGrad = vec2(dFdx(albLuma), dFdy(albLuma));
+      // World-XZ derivatives of the same screen-space sample: gives us
+      // a 2x2 jacobian to map screen-grad into world-XZ-grad.
+      vec2 dXdx = vec2(dFdx(vWorldPos.x), dFdx(vWorldPos.z));
+      vec2 dXdy = vec2(dFdy(vWorldPos.x), dFdy(vWorldPos.z));
+      float det = dXdx.x * dXdy.y - dXdx.y * dXdy.x;
+      if (abs(det) > 1e-8) {
+        vec2 worldLumaGrad = vec2(
+          ( dXdy.y * lumaGrad.x - dXdx.y * lumaGrad.y) / det,
+          (-dXdy.x * lumaGrad.x + dXdx.x * lumaGrad.y) / det
+        );
+        // Project onto sun horizontal direction. Positive = surface gets
+        // darker as we walk toward the sun → this pixel is in the shadow
+        // of a brighter pixel up-sun → apply micro-shadow.
+        vec2 sunHoriz = vec2(uSunDir.x, uSunDir.z);
+        float sunHLen = length(sunHoriz);
+        if (sunHLen > 1e-4) {
+          sunHoriz /= sunHLen;
+          float upSunGrad = dot(worldLumaGrad, sunHoriz);
+          // Positive grad in sun direction = darken. Scale and clamp.
+          // The 4.0 is a tuning constant — luma gradients are tiny in
+          // world units so we boost before clamping.
+          float aoTerm = clamp(upSunGrad * 4.0, 0.0, 1.0);
+          albedo *= 1.0 - aoTerm * uMicroShadow * 0.6;
         }
       }
     }
@@ -2248,6 +2355,13 @@ const sharedUniforms = {
   uTexScale: { value: 2.5 },
   uBlendSharpness: { value: 2.0 },
   uHeightBlend: { value: 0.0 },
+  uMicroShadow: { value: 0.0 },
+  // Snow cover (global accumulation as top fixed-style layer). Packed into
+  // a single vec4 to keep the uniform footprint tight: x=amount, y=heightStart,
+  // z=heightFade, w=slopeMax. Slope fade lives separately because we ran out
+  // of vec4 slots without forcing a vec2.
+  uSnowParams: { value: new THREE.Vector4(0.8, 0.5, 0.15, 0.4) },
+  uSnowSlopeFade: { value: 0.1 },
   uDisplacement: { value: 2.8 },
   uSunDir: { value: new THREE.Vector3(0.6, 0.8, 0.3) },
   uFogColor: { value: new THREE.Vector3(0.55, 0.62, 0.75) },
@@ -4439,6 +4553,46 @@ document.getElementById('blendSharp').addEventListener('input', e => {
 document.getElementById('heightBlend').addEventListener('input', e => {
   sharedUniforms.uHeightBlend.value = parseFloat(e.target.value);
 });
+document.getElementById('microShadow').addEventListener('input', e => {
+  sharedUniforms.uMicroShadow.value = parseFloat(e.target.value);
+});
+
+// Snow Cover sliders. Enabled is the only one that triggers a shader rebuild
+// (it gates the 'snow' material into the matList); the others all flow
+// through live uniforms.
+function pushSnowUniforms() {
+  sharedUniforms.uSnowParams.value.set(
+    STATE.snowCover.amount,
+    STATE.snowCover.heightStart,
+    STATE.snowCover.heightFade,
+    STATE.snowCover.slopeMax
+  );
+  sharedUniforms.uSnowSlopeFade.value = STATE.snowCover.slopeFade;
+}
+document.getElementById('snowEnabled').addEventListener('input', e => {
+  STATE.snowCover.enabled = parseFloat(e.target.value) > 0.5;
+  rebuildMaterial();
+});
+document.getElementById('snowAmount').addEventListener('input', e => {
+  STATE.snowCover.amount = parseFloat(e.target.value);
+  pushSnowUniforms();
+});
+document.getElementById('snowHeightStart').addEventListener('input', e => {
+  STATE.snowCover.heightStart = parseFloat(e.target.value);
+  pushSnowUniforms();
+});
+document.getElementById('snowHeightFade').addEventListener('input', e => {
+  STATE.snowCover.heightFade = parseFloat(e.target.value);
+  pushSnowUniforms();
+});
+document.getElementById('snowSlopeMax').addEventListener('input', e => {
+  STATE.snowCover.slopeMax = parseFloat(e.target.value);
+  pushSnowUniforms();
+});
+document.getElementById('snowSlopeFade').addEventListener('input', e => {
+  STATE.snowCover.slopeFade = parseFloat(e.target.value);
+  pushSnowUniforms();
+});
 document.getElementById('fogDensity').addEventListener('input', e => {
   sharedUniforms.uFogDensity.value = parseFloat(e.target.value);
 });
@@ -4854,12 +5008,14 @@ function collectConfig() {
       baseLayer: { ...STATE.baseLayer },
       layers: STATE.layers.map(l => ({ ...l })),
       biplanar: STATE.biplanar,
-      sharpenBlend: STATE.sharpenBlend
+      sharpenBlend: STATE.sharpenBlend,
+      snowCover: { ...STATE.snowCover }
     },
     shader: {
       texScale: u.uTexScale.value,
       blendSharp: u.uBlendSharpness.value,
       heightBlend: u.uHeightBlend.value,
+      microShadow: u.uMicroShadow.value,
       fogDensity: u.uFogDensity.value,
       displacement: u.uDisplacement.value,
       heightScale: u.uHeightScale.value
@@ -4919,6 +5075,7 @@ function applyConfig(cfg) {
     if (Array.isArray(cfg.state.layers)) STATE.layers = cfg.state.layers.map(l => ({ ...l }));
     if (typeof cfg.state.biplanar === 'boolean') STATE.biplanar = cfg.state.biplanar;
     if (typeof cfg.state.sharpenBlend === 'boolean') STATE.sharpenBlend = cfg.state.sharpenBlend;
+    if (cfg.state.snowCover) STATE.snowCover = { ...STATE.snowCover, ...cfg.state.snowCover };
   }
 
   // Shader group
@@ -4926,6 +5083,7 @@ function applyConfig(cfg) {
     if (typeof cfg.shader.texScale === 'number')     u.uTexScale.value = cfg.shader.texScale;
     if (typeof cfg.shader.blendSharp === 'number')   u.uBlendSharpness.value = cfg.shader.blendSharp;
     if (typeof cfg.shader.heightBlend === 'number')  u.uHeightBlend.value = cfg.shader.heightBlend;
+    if (typeof cfg.shader.microShadow === 'number')  u.uMicroShadow.value = cfg.shader.microShadow;
     if (typeof cfg.shader.fogDensity === 'number')   u.uFogDensity.value = cfg.shader.fogDensity;
     if (typeof cfg.shader.displacement === 'number') u.uDisplacement.value = cfg.shader.displacement;
     if (typeof cfg.shader.heightScale === 'number')  u.uHeightScale.value = cfg.shader.heightScale;
@@ -5026,6 +5184,7 @@ function syncSlidersFromState() {
   set('texScale',        u.uTexScale.value);
   set('blendSharp',      u.uBlendSharpness.value);
   set('heightBlend',     u.uHeightBlend.value);
+  set('microShadow',     u.uMicroShadow.value);
   set('fogDensity',      u.uFogDensity.value);
   set('displacement',    u.uDisplacement.value);
   set('heightScale',     u.uHeightScale.value);
@@ -5085,6 +5244,17 @@ function syncSlidersFromState() {
   if (bpBtn) bpBtn.textContent = `BIPLANAR: ${STATE.biplanar ? 'ON' : 'OFF'}`;
   const sbBtn = document.getElementById('btn-sharpen-blend');
   if (sbBtn) sbBtn.textContent = `SHARPEN BLEND: ${STATE.sharpenBlend ? 'ON' : 'OFF'}`;
+
+  // Snow Cover sliders + uniforms. The 'enabled' flag triggers a shader
+  // rebuild path elsewhere (matList depends on snowOn), so we don't push
+  // it here — applyConfig already calls rebuildMaterial after sync.
+  set('snowEnabled',     STATE.snowCover.enabled ? 1 : 0);
+  set('snowAmount',      STATE.snowCover.amount);
+  set('snowHeightStart', STATE.snowCover.heightStart);
+  set('snowHeightFade',  STATE.snowCover.heightFade);
+  set('snowSlopeMax',    STATE.snowCover.slopeMax);
+  set('snowSlopeFade',   STATE.snowCover.slopeFade);
+  pushSnowUniforms();
 }
 
 function saveConfigToFile() {
