@@ -1269,19 +1269,30 @@ function buildFragmentShader(state) {
   // uvScale stacks with the global texScale. Roughness is a flat scalar
   // uniform — no texture sampler — so we stay under the 16-texture-unit
   // limit when the full 5-material stack is active.
-  const matSampleFns = matList.map((m) => `
+  // Per-material sample function. The HEX TILE flag (per-material toggle on
+  // the Materials panel) selects between the standard 1-tap-per-axis
+  // triplanar/biplanar samplers and the 3-tap-per-axis hex-tile variants
+  // that hide visible texture repetition. Compile-time gated, so the cost
+  // is paid only by materials that opt in.
+  const matSampleFns = matList.map((m) => {
+    const def = MATERIAL_LIBRARY[m];
+    const useHex = def && def.hexTile === true;
+    const albFn = useHex ? 'triplanarAlbedoHex' : 'triplanarAlbedo';
+    const nrmFn = useHex ? 'triplanarNormalHex' : 'triplanarNormal';
+    return `
   void sample_${m}(vec3 wp, vec3 n, vec3 bw, float texScale,
                    out vec3 alb, out vec3 nrm, out float rgh, out float spc) {
     float s = texScale * u_${m}_UvScale;
     float c = cos(u_${m}_UvRot);
     float sn = sin(u_${m}_UvRot);
     mat2 rot = mat2(c, -sn, sn, c);
-    alb = triplanarAlbedo(u_${m}_Color, wp, bw, s, rot) * u_${m}_Tint * u_${m}_Bright;
-    vec3 mnrm = triplanarNormal(u_${m}_Normal, wp, n, bw, s, rot);
+    alb = ${albFn}(u_${m}_Color, wp, bw, s, rot) * u_${m}_Tint * u_${m}_Bright;
+    vec3 mnrm = ${nrmFn}(u_${m}_Normal, wp, n, bw, s, rot);
     nrm = normalize(mix(n, mnrm, u_${m}_NormalStr));
     rgh = clamp(u_${m}_Roughness, 0.0, 1.0);
     spc = u_${m}_Spec;
-  }`).join('\n');
+  }`;
+  }).join('\n');
 
   // GLSL snippet that applies a per-layer gradient tint to `la` (the freshly-
   // sampled material albedo). One helper, parameterized by:
@@ -1652,6 +1663,59 @@ ${layerUniforms}
     return edgeValueNoise(p) * 0.65 + edgeValueNoise(p * 2.13 + 17.0) * 0.35;
   }
 
+  // ── Hex-tile (Mikkelsen stochastic texturing) ──
+  // Kills visible texture repetition by sampling 3 randomly-offset copies of
+  // the texture on a triangular grid and blending them by barycentric weights
+  // sharpened with a power. Mikkelsen's variant — no per-pixel rotation, no
+  // histogram pre-process; works on any texture out of the box. Per axis-tap,
+  // so under triplanar a hex-tiled material costs 3 axes × 3 hex samples = 9
+  // taps for color + 9 for normal = 18 taps. Under biplanar 12 taps. Use
+  // sparingly (1-2 dominant materials), but the visual win is dramatic.
+  // https://godotshaders.com/shader/stochastic-hex-tiling-mikkelsens-adaptation/
+  vec2 hex_hash(vec2 p) {
+    vec2 r = mat2(127.1, 311.7, 269.5, 183.3) * p;
+    return fract(sin(r) * 43758.5453);
+  }
+  vec4 hex_weights(vec2 uv, out vec2 vert0, out vec2 vert1, out vec2 vert2) {
+    // Skew uv into triangular grid (after Heitz/Mikkelsen).
+    const mat2 toSkew = mat2(1.0, 0.0, -0.57735027, 1.15470054);
+    vec2 sk = toSkew * uv;
+    vec2 fl = floor(sk);
+    vec2 fr = fract(sk);
+    // Pick the triangle in this rhombic cell (upper or lower).
+    float upperTri = step(1.0, fr.x + fr.y);
+    vec2 v0 = fl + vec2(upperTri, upperTri);
+    vec2 v1 = fl + vec2(upperTri, 1.0 - upperTri);
+    vec2 v2 = fl + vec2(1.0 - upperTri, upperTri);
+    // Barycentric weights inside the chosen triangle.
+    vec3 bw = vec3(1.0 - fr.x - fr.y, fr.x, fr.y);
+    // GLSL ES 1.00 has no vector ternary; mix() does the same job branchlessly.
+    bw = mix(bw, vec3(-bw.x, 1.0 - bw.z, 1.0 - bw.y), upperTri);
+    vert0 = v0; vert1 = v1; vert2 = v2;
+    // Sharpen the blend so the 3-way kiss-points stay tight (Mikkelsen).
+    bw = pow(bw, vec3(7.0));
+    bw /= dot(bw, vec3(1.0));
+    return vec4(bw, 0.0);
+  }
+  vec3 hex_albedo(sampler2D map, vec2 uv) {
+    vec2 v0, v1, v2;
+    vec4 w = hex_weights(uv, v0, v1, v2);
+    vec3 c0 = texture2D(map, uv + hex_hash(v0)).rgb;
+    vec3 c1 = texture2D(map, uv + hex_hash(v1)).rgb;
+    vec3 c2 = texture2D(map, uv + hex_hash(v2)).rgb;
+    return c0 * w.x + c1 * w.y + c2 * w.z;
+  }
+  vec3 hex_normalRaw(sampler2D map, vec2 uv) {
+    vec2 v0, v1, v2;
+    vec4 w = hex_weights(uv, v0, v1, v2);
+    vec3 n0 = texture2D(map, uv + hex_hash(v0)).xyz;
+    vec3 n1 = texture2D(map, uv + hex_hash(v1)).xyz;
+    vec3 n2 = texture2D(map, uv + hex_hash(v2)).xyz;
+    // Raw RGB blend. The downstream whiteout-normal logic handles the
+    // 2× - 1 unpack and the per-axis combine.
+    return n0 * w.x + n1 * w.y + n2 * w.z;
+  }
+
   // ── Triplanar helpers (with per-material UV rotation) ──
   ${state.biplanar ? `
   // Biplanar projection (Inigo Quilez). Samples only the 2 dominant axes
@@ -1783,6 +1847,113 @@ ${layerUniforms}
     vec3 tX = texture2D(map, uvX).xyz * 2.0 - 1.0;
     vec3 tY = texture2D(map, uvY).xyz * 2.0 - 1.0;
     vec3 tZ = texture2D(map, uvZ).xyz * 2.0 - 1.0;
+    vec3 nX = vec3(tX.xy + surfN.zy, abs(tX.z) * surfN.x);
+    vec3 nY = vec3(tY.xy + surfN.xz, abs(tY.z) * surfN.y);
+    vec3 nZ = vec3(tZ.xy + surfN.xy, abs(tZ.z) * surfN.z);
+    return normalize(
+      nX.zyx * bw.x +
+      nY.xzy * bw.y +
+      nZ.xyz * bw.z
+    );
+  }
+  `}
+
+  // ── Hex-tile triplanar/biplanar wrappers ──
+  // Identical to the regular triplanarAlbedo/triplanarNormal above but every
+  // texture2D fetch is replaced by a 3-tap hex_albedo / hex_normalRaw call
+  // that hides texture repetition. Per-material opt-in via the HEX TILE
+  // toggle on the Materials panel — only materials that flip it on pay the
+  // 3× cost. Biplanar-aware so a hex-tiled material under biplanar costs
+  // 2 axes × 3 hex = 6 taps, not 9.
+  ${state.biplanar ? `
+  vec3 triplanarAlbedoHex(sampler2D map, vec3 wp, vec3 bw, float scale, mat2 rot) {
+    vec3 an = abs(vWorldNormal);
+    float ax = an.x, ay = an.y, az = an.z;
+    vec3 cMa, cMe;
+    float wMa, wMe;
+    if (ax >= ay && ax >= az) {
+      cMa = hex_albedo(map, rot * (wp.yz * scale)); wMa = ax;
+      if (ay >= az) { cMe = hex_albedo(map, rot * (wp.xz * scale)); wMe = ay; }
+      else          { cMe = hex_albedo(map, rot * (wp.xy * scale)); wMe = az; }
+    } else if (ay >= az) {
+      cMa = hex_albedo(map, rot * (wp.xz * scale)); wMa = ay;
+      if (ax >= az) { cMe = hex_albedo(map, rot * (wp.yz * scale)); wMe = ax; }
+      else          { cMe = hex_albedo(map, rot * (wp.xy * scale)); wMe = az; }
+    } else {
+      cMa = hex_albedo(map, rot * (wp.xy * scale)); wMa = az;
+      if (ax >= ay) { cMe = hex_albedo(map, rot * (wp.yz * scale)); wMe = ax; }
+      else          { cMe = hex_albedo(map, rot * (wp.xz * scale)); wMe = ay; }
+    }
+    vec2 w2 = vec2(wMa, wMe);
+    w2 = max(w2 - 0.5773, 0.0);
+    w2 = pow(w2, vec2(uBlendSharpness));
+    ${state.sharpenBlend ? 'w2 *= w2;' : ''}
+    float sum = w2.x + w2.y + 1e-5;
+    return (cMa * w2.x + cMe * w2.y) / sum;
+  }
+  vec3 triplanarNormalHex(sampler2D map, vec3 wp, vec3 surfN, vec3 bw, float scale, mat2 rot) {
+    vec3 an = abs(surfN);
+    float ax = an.x, ay = an.y, az = an.z;
+    vec3 contribMa, contribMe;
+    float wMa, wMe;
+    if (ax >= ay && ax >= az) {
+      vec3 tX = hex_normalRaw(map, rot * (wp.yz * scale)) * 2.0 - 1.0;
+      contribMa = vec3(tX.xy + surfN.zy, abs(tX.z) * surfN.x).zyx;
+      wMa = ax;
+      if (ay >= az) {
+        vec3 tY = hex_normalRaw(map, rot * (wp.xz * scale)) * 2.0 - 1.0;
+        contribMe = vec3(tY.xy + surfN.xz, abs(tY.z) * surfN.y).xzy; wMe = ay;
+      } else {
+        vec3 tZ = hex_normalRaw(map, rot * (wp.xy * scale)) * 2.0 - 1.0;
+        contribMe = vec3(tZ.xy + surfN.xy, abs(tZ.z) * surfN.z); wMe = az;
+      }
+    } else if (ay >= az) {
+      vec3 tY = hex_normalRaw(map, rot * (wp.xz * scale)) * 2.0 - 1.0;
+      contribMa = vec3(tY.xy + surfN.xz, abs(tY.z) * surfN.y).xzy;
+      wMa = ay;
+      if (ax >= az) {
+        vec3 tX = hex_normalRaw(map, rot * (wp.yz * scale)) * 2.0 - 1.0;
+        contribMe = vec3(tX.xy + surfN.zy, abs(tX.z) * surfN.x).zyx; wMe = ax;
+      } else {
+        vec3 tZ = hex_normalRaw(map, rot * (wp.xy * scale)) * 2.0 - 1.0;
+        contribMe = vec3(tZ.xy + surfN.xy, abs(tZ.z) * surfN.z); wMe = az;
+      }
+    } else {
+      vec3 tZ = hex_normalRaw(map, rot * (wp.xy * scale)) * 2.0 - 1.0;
+      contribMa = vec3(tZ.xy + surfN.xy, abs(tZ.z) * surfN.z);
+      wMa = az;
+      if (ax >= ay) {
+        vec3 tX = hex_normalRaw(map, rot * (wp.yz * scale)) * 2.0 - 1.0;
+        contribMe = vec3(tX.xy + surfN.zy, abs(tX.z) * surfN.x).zyx; wMe = ax;
+      } else {
+        vec3 tY = hex_normalRaw(map, rot * (wp.xz * scale)) * 2.0 - 1.0;
+        contribMe = vec3(tY.xy + surfN.xz, abs(tY.z) * surfN.y).xzy; wMe = ay;
+      }
+    }
+    vec2 w2 = vec2(wMa, wMe);
+    w2 = max(w2 - 0.5773, 0.0);
+    w2 = pow(w2, vec2(uBlendSharpness));
+    ${state.sharpenBlend ? 'w2 *= w2;' : ''}
+    float sum = w2.x + w2.y + 1e-5;
+    return normalize((contribMa * w2.x + contribMe * w2.y) / sum);
+  }
+  ` : `
+  vec3 triplanarAlbedoHex(sampler2D map, vec3 wp, vec3 bw, float scale, mat2 rot) {
+    vec2 uvX = rot * (wp.yz * scale);
+    vec2 uvY = rot * (wp.xz * scale);
+    vec2 uvZ = rot * (wp.xy * scale);
+    vec3 cX = hex_albedo(map, uvX);
+    vec3 cY = hex_albedo(map, uvY);
+    vec3 cZ = hex_albedo(map, uvZ);
+    return cX * bw.x + cY * bw.y + cZ * bw.z;
+  }
+  vec3 triplanarNormalHex(sampler2D map, vec3 wp, vec3 surfN, vec3 bw, float scale, mat2 rot) {
+    vec2 uvX = rot * (wp.yz * scale);
+    vec2 uvY = rot * (wp.xz * scale);
+    vec2 uvZ = rot * (wp.xy * scale);
+    vec3 tX = hex_normalRaw(map, uvX) * 2.0 - 1.0;
+    vec3 tY = hex_normalRaw(map, uvY) * 2.0 - 1.0;
+    vec3 tZ = hex_normalRaw(map, uvZ) * 2.0 - 1.0;
     vec3 nX = vec3(tX.xy + surfN.zy, abs(tX.z) * surfN.x);
     vec3 nY = vec3(tY.xy + surfN.xz, abs(tY.z) * surfN.y);
     vec3 nZ = vec3(tZ.xy + surfN.xy, abs(tZ.z) * surfN.z);
@@ -2531,16 +2702,21 @@ function computeShaderStats(fragSrc, vertSrc, state) {
   // --- Texture taps ---
   // Each material needs color + normal; triplanar samples each on 3 axes
   // (2 samplers × 3 axes = 6 taps), biplanar on only the 2 dominant axes
-  // (2 samplers × 2 axes = 4 taps). Only UNIQUE materials referenced by
-  // the base + auto-layers cost taps (the shader coalesces duplicates).
+  // (2 samplers × 2 axes = 4 taps). Hex-tile materials triple that on the
+  // axes they use (3 stochastic samples per axis-tap to hide repetition).
   const usedMats = new Set([state.baseLayer.material, ...state.layers.map(l => l.material)]);
   const materialCount = usedMats.size;
   const tapsPerMaterial = state.biplanar ? 4 : 6;
-  // But each auto-layer also calls sample_XX() — even if two layers share
-  // a material, the sample function runs once per layer at the blend site.
-  // So the real tap count is: 1 base + N layers, each costing tapsPerMaterial.
+  // Each auto-layer + the base calls sample_XX() once. Tap count for each
+  // call depends on whether THAT material has hexTile enabled.
+  const tapsForMat = (matId) => {
+    const def = MATERIAL_LIBRARY[matId];
+    const hex = def && def.hexTile === true;
+    return tapsPerMaterial * (hex ? 3 : 1);
+  };
   const sampleCallsPerPixel = 1 + state.layers.length;
-  const materialTaps = tapsPerMaterial * sampleCallsPerPixel;
+  let materialTaps = tapsForMat(state.baseLayer.material);
+  for (const l of state.layers) materialTaps += tapsForMat(l.material);
   // PCF shadow sampling: 16-tap Poisson disk when shadows are enabled.
   const shadowTaps = sharedUniforms.uShadowEnabled.value > 0.5 ? 16 : 0;
   const tapsPerPixel = materialTaps + shadowTaps;
@@ -4893,7 +5069,8 @@ function collectConfig() {
         tint: [...m.tint],
         roughness: m.roughness,
         normalStrength: m.normalStrength,
-        specular: m.specular
+        specular: m.specular,
+        hexTile: m.hexTile === true
       }])
     ),
     // Embed the actual image bytes as data URLs so a saved config can
@@ -4983,6 +5160,7 @@ function applyConfig(cfg) {
       if (typeof mc.roughness === 'number')      m.roughness = mc.roughness;
       if (typeof mc.normalStrength === 'number') m.normalStrength = mc.normalStrength;
       if (typeof mc.specular === 'number')       m.specular = mc.specular;
+      if (typeof mc.hexTile === 'boolean')       m.hexTile = mc.hexTile;
       const mu = ensureMatUniforms(id);
       mu.UvScale.value   = m.uvScale;
       mu.UvRot.value     = m.uvRotation;
@@ -5738,6 +5916,10 @@ function renderMaterialsPanel() {
         <input type="range" min="0" max="6.2832" step="0.01" value="${m.uvRotation}" data-k="uvRotation">
         <span class="val">${m.uvRotation.toFixed(2)}</span>
       </div>
+      <div class="layer-slider" title="Mikkelsen stochastic hex-tiling: replaces each axis-tap with 3 randomly-offset taps blended on a triangular grid. Kills visible texture repetition at 3× the per-axis tap cost. Use sparingly (1-2 dominant materials) — heavy.">
+        <label>Hex Tile</label>
+        <input type="checkbox" data-k="hexTile" ${m.hexTile ? 'checked' : ''} style="width:14px; height:14px; margin:0;">
+      </div>
     `;
     matList.appendChild(card);
 
@@ -5747,6 +5929,16 @@ function renderMaterialsPanel() {
       m.tint = rgb;
       m._uniforms.Tint.value.set(...rgb);
     });
+
+    // Hex Tile checkbox → triggers shader rebuild (changes which sample
+    // helper is emitted in matSampleFns).
+    const hexBox = card.querySelector('input[type="checkbox"][data-k="hexTile"]');
+    if (hexBox) {
+      hexBox.addEventListener('change', e => {
+        m.hexTile = e.target.checked;
+        rebuildMaterial();
+      });
+    }
 
     // Range sliders → corresponding uniform
     card.querySelectorAll('input[type="range"]').forEach(input => {
