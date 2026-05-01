@@ -1020,7 +1020,11 @@ const MATERIAL_LIBRARY = {
     color:  'textures/rock/Rock030_1K-JPG_Color.jpg',
     normal: 'textures/rock/Rock030_1K-JPG_NormalGL.jpg',
     uvScale: 1.8, uvRotation: 0.0,
-    brightness: 0.35, tint: [0.55, 0.40, 0.32],
+    // Darker + more red-shifted than before so the radial spike pattern is
+    // visible against ANY underlying layer, not just snow. Grass has an
+    // albedo close to mid-rock, so the scorch tint needs to drop toward
+    // black/red to give the spikes contrast where they thin out.
+    brightness: 0.22, tint: [0.45, 0.22, 0.16],
     roughness: 0.95, normalStrength: 1.3, specular: 0.3
   }
 };
@@ -1585,10 +1589,8 @@ function buildFragmentShader(state) {
   uniform float uTexScale;
   uniform float uBlendSharpness;
   uniform float uHeightBlend;       // global Frostbite-style height-blend strength (0 = pure smoothstep masks, 1 = fully luma-driven)
-  uniform sampler2D uSedimentTex;   // CPU-baked talus mask (R8). Sampled in heightmap UV space.
-  uniform float     uSedimentEnabled;
-  uniform float     uSedimentStrength;
-  uniform float     uSedimentDebugTint;
+  uniform float uSedimentStrength;  // multiplier on the sediment mask (B channel of uDamageMask)
+  uniform float uSedimentDebugTint; // 0..1 visualisation overlay strength
   uniform vec3  uSunDir;
   uniform vec3  uFogColor;
   uniform float uFogDensity;
@@ -1790,10 +1792,21 @@ ${layerUniforms}
     // Sharpen the 2-way blend with the same blend-sharpness power used
     // by triplanar so the visual matches as closely as possible.
     vec2 w2 = vec2(wMa, wMe);
+    // Subtract the cos(54.7°) ≈ 1/sqrt(3) "neutral" weight so only the
+    // dominant projection contributes, then sharpen by uBlendSharpness
+    // and (optionally) the squared-weights tweak. AFTER all the power-law
+    // crunching, floor the result at a small positive value: at acute
+    // terrain corners both weights can otherwise collapse far below 1e-5
+    // and the cMa * w / sum divide darkens those pixels to near-black.
+    // Flooring post-pow guarantees the blend stays well-defined no matter
+    // how aggressive the sharpen power gets.
     w2 = max(w2 - 0.5773, 0.0);
     w2 = pow(w2, vec2(uBlendSharpness));
     ${state.sharpenBlend ? 'w2 *= w2;  // SHARPEN BLEND (Primozic): squared weights for sharper biplanar pick' : ''}
-    float sum = w2.x + w2.y + 1e-5;
+    // Floor post-pow so the divide can never collapse to near-zero on
+    // acute terrain corners where both major + medium weights crash out.
+    w2 = max(w2, vec2(1e-3));
+    float sum = w2.x + w2.y;
     return (cMa * w2.x + cMe * w2.y) / sum;
   }
   ` : `
@@ -1871,10 +1884,21 @@ ${layerUniforms}
       }
     }
     vec2 w2 = vec2(wMa, wMe);
+    // Subtract the cos(54.7°) ≈ 1/sqrt(3) "neutral" weight so only the
+    // dominant projection contributes, then sharpen by uBlendSharpness
+    // and (optionally) the squared-weights tweak. AFTER all the power-law
+    // crunching, floor the result at a small positive value: at acute
+    // terrain corners both weights can otherwise collapse far below 1e-5
+    // and the cMa * w / sum divide darkens those pixels to near-black.
+    // Flooring post-pow guarantees the blend stays well-defined no matter
+    // how aggressive the sharpen power gets.
     w2 = max(w2 - 0.5773, 0.0);
     w2 = pow(w2, vec2(uBlendSharpness));
     ${state.sharpenBlend ? 'w2 *= w2;  // SHARPEN BLEND (Primozic): squared weights for sharper biplanar pick' : ''}
-    float sum = w2.x + w2.y + 1e-5;
+    // Floor post-pow so the divide can never collapse to near-zero on
+    // acute terrain corners where both major + medium weights crash out.
+    w2 = max(w2, vec2(1e-3));
+    float sum = w2.x + w2.y;
     return normalize((contribMa * w2.x + contribMe * w2.y) / sum);
   }
   ` : `
@@ -1923,10 +1947,21 @@ ${layerUniforms}
       else          { cMe = hex_albedo(map, rot * (wp.xz * scale)); wMe = ay; }
     }
     vec2 w2 = vec2(wMa, wMe);
+    // Subtract the cos(54.7°) ≈ 1/sqrt(3) "neutral" weight so only the
+    // dominant projection contributes, then sharpen by uBlendSharpness
+    // and (optionally) the squared-weights tweak. AFTER all the power-law
+    // crunching, floor the result at a small positive value: at acute
+    // terrain corners both weights can otherwise collapse far below 1e-5
+    // and the cMa * w / sum divide darkens those pixels to near-black.
+    // Flooring post-pow guarantees the blend stays well-defined no matter
+    // how aggressive the sharpen power gets.
     w2 = max(w2 - 0.5773, 0.0);
     w2 = pow(w2, vec2(uBlendSharpness));
     ${state.sharpenBlend ? 'w2 *= w2;' : ''}
-    float sum = w2.x + w2.y + 1e-5;
+    // Floor post-pow so the divide can never collapse to near-zero on
+    // acute terrain corners where both major + medium weights crash out.
+    w2 = max(w2, vec2(1e-3));
+    float sum = w2.x + w2.y;
     return (cMa * w2.x + cMe * w2.y) / sum;
   }
   vec3 triplanarNormalHex(sampler2D map, vec3 wp, vec3 surfN, vec3 bw, float scale, mat2 rot) {
@@ -1969,10 +2004,21 @@ ${layerUniforms}
       }
     }
     vec2 w2 = vec2(wMa, wMe);
+    // Subtract the cos(54.7°) ≈ 1/sqrt(3) "neutral" weight so only the
+    // dominant projection contributes, then sharpen by uBlendSharpness
+    // and (optionally) the squared-weights tweak. AFTER all the power-law
+    // crunching, floor the result at a small positive value: at acute
+    // terrain corners both weights can otherwise collapse far below 1e-5
+    // and the cMa * w / sum divide darkens those pixels to near-black.
+    // Flooring post-pow guarantees the blend stays well-defined no matter
+    // how aggressive the sharpen power gets.
     w2 = max(w2 - 0.5773, 0.0);
     w2 = pow(w2, vec2(uBlendSharpness));
     ${state.sharpenBlend ? 'w2 *= w2;' : ''}
-    float sum = w2.x + w2.y + 1e-5;
+    // Floor post-pow so the divide can never collapse to near-zero on
+    // acute terrain corners where both major + medium weights crash out.
+    w2 = max(w2, vec2(1e-3));
+    float sum = w2.x + w2.y;
     return normalize((contribMa * w2.x + contribMe * w2.y) / sum);
   }
   ` : `
@@ -2038,16 +2084,23 @@ ${matSampleFns}
     // open a layer's slope band (e.g. grass) inside the new crater floor.
     float slopeOriginal = clamp(1.0 - abs(normalize(vWorldNormalOriginal).y), 0.0, 1.0);
 
-    // Sample explosion damage mask in world-XZ space. uv.x → +X, uv.y → -Z
-    // so the mapping below mirrors the vertex shader exactly.
+    // Sample the damage mask in world-XZ space. uv.x → +X, uv.y → -Z so the
+    // mapping mirrors the vertex shader. Channel layout:
+    //   R = scorch (explosion overlay strength)
+    //   G = signed crater depth (read in vertex shader, not here)
+    //   B = sediment / talus mask (CPU-baked from heightmap, see bakeSedimentMask)
+    // Single tap, both R and B come back together.
     float damageScorch = 0.0;
+    float damageSediment = 0.0;
     if (uDamageEnabled > 0.5) {
       vec2 dmgUV = vec2(
          vWorldPos.x / uWorldWidth + 0.5,
         -vWorldPos.z / uWorldDepth + 0.5
       );
       if (dmgUV.x >= 0.0 && dmgUV.x <= 1.0 && dmgUV.y >= 0.0 && dmgUV.y <= 1.0) {
-        damageScorch = texture2D(uDamageMask, dmgUV).r;
+        vec2 dmgRB = texture2D(uDamageMask, dmgUV).rb;
+        damageScorch   = dmgRB.x;
+        damageSediment = dmgRB.y;
       }
     }
 
@@ -2074,7 +2127,12 @@ ${scorchOn ? `
     if (damageScorch > 0.001) {
       vec3 dAlb; vec3 dNrm; float dRgh; float dSpc;
       sample_damage(vWorldPos, geoNormal, blendWeights, scale, dAlb, dNrm, dRgh, dSpc);
-      float m = clamp(damageScorch, 0.0, 1.0);
+      // Brighten low scorch values so the radial spike pattern (which the
+      // organic-layer erase ABOVE picks up linearly) also shows through in
+      // the scorch texture overlay. pow(m, 0.35) lifts the dim tail of each
+      // spike well into visible range — important on layers like grass
+      // whose albedo contrast against the scorch material is naturally low.
+      float m = pow(clamp(damageScorch, 0.0, 1.0), 0.35);
       albedo    = mix(albedo, dAlb, m);
       normalAcc = mix(normalAcc, dNrm, m);
       roughAcc  = mix(roughAcc, dRgh, m);
@@ -2176,20 +2234,15 @@ ${scorchOn ? `
       }
     }
 
-    // ── Sediment / talus overlay (CPU-baked mask) ──
-    // 1 texture tap. The mask is non-zero at the foot of cliffs (where
-    // detached material has accumulated). Debug Tint controls a red
-    // overlay so you can see where the mask fires; in production use you
-    // would drive a sediment material layer or a paint-mask channel from
-    // this signal instead of the debug tint.
-    if (uSedimentEnabled > 0.5) {
-      vec2 sedUV = vec2(
-         vWorldPos.x / uWorldWidth + 0.5,
-        -vWorldPos.z / uWorldDepth + 0.5
-      );
-      float sedMask = texture2D(uSedimentTex, sedUV).r * uSedimentStrength;
-      sedMask = clamp(sedMask, 0.0, 1.0);
-      // Debug visualisation: warm sand/dust tint blended in by the mask.
+    // ── Sediment / talus overlay ──
+    // Reuses damageSediment (B channel of uDamageMask, sampled together with
+    // scorch above — no extra texture tap). The mask is non-zero at the foot
+    // of cliffs where detached material has accumulated. Debug Tint blends
+    // in a warm sand colour so you can see where the mask fires; in
+    // production use you would drive a sediment material layer or a
+    // paint-mask channel from this signal instead.
+    if (uSedimentStrength > 0.001 && uSedimentDebugTint > 0.001) {
+      float sedMask = clamp(damageSediment * uSedimentStrength, 0.0, 1.0);
       vec3 sedColor = vec3(0.78, 0.62, 0.42);
       float tintAmt = sedMask * uSedimentDebugTint;
       albedo = mix(albedo, albedo * 0.7 + sedColor * 0.55, tintAmt);
@@ -2476,17 +2529,12 @@ const sharedUniforms = {
   uTexScale: { value: 2.5 },
   uBlendSharpness: { value: 2.0 },
   uHeightBlend: { value: 0.0 },
-  // Sediment mask (CPU-baked from the heightmap, 1 sampler in main render).
-  // uSedimentTex is replaced with a fresh DataTexture each time the user
-  // tweaks Radius / Threshold / Slope Fade — those rebake the mask. The
-  // Strength and Debug Tint sliders flow through pure uniforms (no rebake).
-  // Initialised to a 1×1 zero texture so the sampler binding is valid even
-  // before the first heightmap load (some drivers warn about null samplers).
-  uSedimentTex:       { value: (() => {
-    const t = new THREE.DataTexture(new Uint8Array([0]), 1, 1, THREE.LuminanceFormat, THREE.UnsignedByteType);
-    t.needsUpdate = true;
-    return t;
-  })() },
+  // Sediment mask is CPU-baked into the damage mask's BLUE channel (R=scorch,
+  // G=signed crater depth, B=sediment, A=unused). Reuses the existing damage
+  // sampler — no extra sampler cost, no MAX_TEXTURE_IMAGE_UNITS pressure when
+  // both scorch and sediment are on at the same time. The Strength and Debug
+  // Tint sliders flow through these uniforms; Radius / Threshold / Slope
+  // Fade trigger a full re-bake of the B channel + a needsUpdate=true.
   uSedimentEnabled:   { value: 0.0 },
   uSedimentStrength:  { value: 1.0 },
   uSedimentDebugTint: { value: 1.0 },
@@ -3251,26 +3299,34 @@ function analyzeHeightFloat32(heightInfo) {
   return { width: w, height: h, min, max };
 }
 
-// ── Sediment / talus mask (CPU bake from heightmap) ──────────────────────
+// ── Sediment / talus mask (CPU bake into damage mask B channel) ──────────
 // For each heightmap pixel, sample 8 neighbours in a ring at the configured
 // radius. Sum the height excess of any neighbour that sits more than the
 // threshold above me — that's the "talus from above" signal. Multiply by
-// (1 - slope) to fade off cliffs themselves. Result is a [0,1] R8 texture
-// the fragment shader can sample with a single tap.
+// (1 - slope) to fade off cliffs themselves. Writes the normalised result
+// into the damage mask's BLUE channel so we share a sampler with scorch+
+// crater (no extra MAX_TEXTURE_IMAGE_UNITS pressure).
 //
 // Cost: O(W*H * 8 samples). For 512² that's ~2M ops, runs in well under
-// 5ms even in JS. Re-baked when heightmap loads OR when Radius / Threshold
-// / Slope Fade slider changes (the cheap-to-bake branch). Strength + Debug
-// Tint flow through pure uniforms with no rebake.
+// 5ms even in JS. Re-baked when the heightmap loads OR when Radius /
+// Threshold / Slope Fade slider changes. Strength + Debug Tint flow
+// through pure uniforms with no rebake.
+//
+// Note on damage-mask resolution: damageMaskW × damageMaskH might differ
+// from the heightmap resolution (it's 1024² for procedural, otherwise
+// matches the heightmap). We bake AT the heightmap resolution and then
+// nearest-resample into the damage mask. For the common case where they
+// match (real heightmap loaded), the loop runs 1:1.
 let lastBakedHeightInfo = null;     // remembers the source so slider tweaks can rebake
 function bakeSedimentMask(heightInfo) {
-  const { width: w, height: h, data } = heightInfo;
+  if (!damageMaskData) return;  // ensureDamageMask() hasn't run yet
+  const { width: hw, height: hh, data } = heightInfo;
+  const dw = damageMaskW, dh = damageMaskH;
   const cfg = STATE.sediment;
   const radius = Math.max(1, Math.round(cfg.radius));
   const thr = Math.max(0, cfg.threshold);
   const slopeFadeAmt = Math.max(0, Math.min(1, cfg.slopeFade));
 
-  // Pre-compute the 8 ring directions × radius once. (cos/sin per angle.)
   const NUM_DIRS = 8;
   const dx = new Int32Array(NUM_DIRS);
   const dy = new Int32Array(NUM_DIRS);
@@ -3280,60 +3336,65 @@ function bakeSedimentMask(heightInfo) {
     dy[i] = Math.round(Math.sin(a) * radius);
   }
 
-  const out = new Uint8Array(w * h);
+  // Pass 1: raw talus signal at heightmap resolution.
+  const raw = new Float32Array(hw * hh);
   let maxAccum = 0;
-  // Pass 1: accumulate raw talus signal.
-  const raw = new Float32Array(w * h);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const me = data[y * w + x];
+  for (let y = 0; y < hh; y++) {
+    for (let x = 0; x < hw; x++) {
+      const me = data[y * hw + x];
       let accum = 0;
       for (let i = 0; i < NUM_DIRS; i++) {
         let nx = x + dx[i];
         let ny = y + dy[i];
-        if (nx < 0) nx = 0; else if (nx >= w) nx = w - 1;
-        if (ny < 0) ny = 0; else if (ny >= h) ny = h - 1;
-        const nh = data[ny * w + nx];
+        if (nx < 0) nx = 0; else if (nx >= hw) nx = hw - 1;
+        if (ny < 0) ny = 0; else if (ny >= hh) ny = hh - 1;
+        const nh = data[ny * hw + nx];
         const delta = nh - me - thr;
         if (delta > 0) accum += delta;
       }
-      // Slope of THIS pixel (central difference). Used to fade sediment off
-      // steep cliff faces — talus naturally slides off near-vertical rocks.
       let slope = 0;
       if (slopeFadeAmt > 0) {
-        const xL = Math.max(0, x - 1), xR = Math.min(w - 1, x + 1);
-        const yU = Math.max(0, y - 1), yD = Math.min(h - 1, y + 1);
-        const gx = data[y * w + xR] - data[y * w + xL];
-        const gy = data[yD * w + x] - data[yU * w + x];
+        const xL = Math.max(0, x - 1), xR = Math.min(hw - 1, x + 1);
+        const yU = Math.max(0, y - 1), yD = Math.min(hh - 1, y + 1);
+        const gx = data[y * hw + xR] - data[y * hw + xL];
+        const gy = data[yD * hw + x] - data[yU * hw + x];
         slope = Math.sqrt(gx * gx + gy * gy);
       }
       const slopeMask = 1.0 - Math.min(1.0, slope * 30.0) * slopeFadeAmt;
       const v = accum * slopeMask;
-      raw[y * w + x] = v;
+      raw[y * hw + x] = v;
       if (v > maxAccum) maxAccum = v;
     }
   }
-  // Pass 2: normalize to [0..255] and write the R8 texture.
-  const norm = maxAccum > 1e-6 ? (255.0 / maxAccum) : 0.0;
-  for (let p = 0; p < w * h; p++) {
-    const v = raw[p] * norm;
-    out[p] = v > 255 ? 255 : (v < 0 ? 0 : v);
+  // Pass 2: write normalised mask into damage mask B channel. Nearest-
+  // neighbour resample if the resolutions differ.
+  const norm = maxAccum > 1e-6 ? (1.0 / maxAccum) : 0.0;
+  for (let dy = 0; dy < dh; dy++) {
+    const sy = (dy * hh / dh) | 0;
+    for (let dx2 = 0; dx2 < dw; dx2++) {
+      const sx = (dx2 * hw / dw) | 0;
+      const idx = (dy * dw + dx2) * 4 + 2;  // +2 = B channel
+      damageMaskData[idx] = raw[sy * hw + sx] * norm;
+    }
   }
-  const tex = new THREE.DataTexture(out, w, h, THREE.LuminanceFormat, THREE.UnsignedByteType);
-  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
-  tex.magFilter = THREE.LinearFilter;
-  tex.generateMipmaps = true;
-  tex.needsUpdate = true;
-  return tex;
+  damageMaskTex.needsUpdate = true;  // full re-upload of the damage mask
 }
 
 function refreshSedimentMask() {
   if (!lastBakedHeightInfo) return;
-  const prev = sharedUniforms.uSedimentTex.value;
-  const tex = bakeSedimentMask(lastBakedHeightInfo);
-  sharedUniforms.uSedimentTex.value = tex;
-  if (prev && prev.dispose) prev.dispose();
+  if (!damageMaskData) return;
+  bakeSedimentMask(lastBakedHeightInfo);
+}
+
+// Clear the sediment B channel without touching scorch (R) or crater (G).
+// Called when sediment is disabled so leftover mask doesn't keep tinting.
+function clearSedimentChannel() {
+  if (!damageMaskData) return;
+  const len = damageMaskW * damageMaskH;
+  for (let p = 0, o = 2; p < len; p++, o += 4) {
+    damageMaskData[o] = 0;
+  }
+  damageMaskTex.needsUpdate = true;
 }
 
 // Build a float DataTexture from a Float32Array of heights in [0,1].
@@ -4627,9 +4688,10 @@ function applyHeightFloat32(heightInfo) {
   // can sample the displaced surface CPU-side.
   info.data = heightInfo.data;
   lastHeightmapInfo = info;
-  // Also remember it for the sediment mask — same buffer, no copy.
+  // Also remember it for the sediment mask — same buffer, no copy. The
+  // actual bake happens AFTER ensureDamageMask() below (sediment writes
+  // into the damage mask's B channel; ensureDamageMask resets the buffer).
   lastBakedHeightInfo = heightInfo;
-  refreshSedimentMask();
   STATE.heightmapAspect = info.width / info.height;
 
   const tex = makeHeightDataTexture(heightInfo);
@@ -4644,6 +4706,9 @@ function applyHeightFloat32(heightInfo) {
 
   rebuildGeometry();
   ensureDamageMask();
+  // Sediment mask is baked into the damage mask's B channel — must run
+  // AFTER ensureDamageMask() (which fills the buffer with zeros).
+  if (STATE.sediment.enabled) refreshSedimentMask();
   buildWater();
 
   if (prev && prev !== tex) prev.dispose();
@@ -4781,6 +4846,12 @@ document.getElementById('heightBlend').addEventListener('input', e => {
 document.getElementById('sedimentEnabled').addEventListener('input', e => {
   STATE.sediment.enabled = parseFloat(e.target.value) > 0.5;
   sharedUniforms.uSedimentEnabled.value = STATE.sediment.enabled ? 1.0 : 0.0;
+  // Sediment lives in the damage mask's B channel; toggle bakes or clears.
+  if (STATE.sediment.enabled) {
+    refreshSedimentMask();
+  } else {
+    clearSedimentChannel();
+  }
 });
 document.getElementById('sedimentStrength').addEventListener('input', e => {
   STATE.sediment.strength = parseFloat(e.target.value);
@@ -4792,15 +4863,15 @@ document.getElementById('sedimentDebugTint').addEventListener('input', e => {
 });
 document.getElementById('sedimentRadius').addEventListener('input', e => {
   STATE.sediment.radius = parseFloat(e.target.value);
-  refreshSedimentMask();
+  if (STATE.sediment.enabled) refreshSedimentMask();
 });
 document.getElementById('sedimentThreshold').addEventListener('input', e => {
   STATE.sediment.threshold = parseFloat(e.target.value);
-  refreshSedimentMask();
+  if (STATE.sediment.enabled) refreshSedimentMask();
 });
 document.getElementById('sedimentSlopeFade').addEventListener('input', e => {
   STATE.sediment.slopeFade = parseFloat(e.target.value);
-  refreshSedimentMask();
+  if (STATE.sediment.enabled) refreshSedimentMask();
 });
 document.getElementById('fogDensity').addEventListener('input', e => {
   sharedUniforms.uFogDensity.value = parseFloat(e.target.value);
@@ -4933,6 +5004,9 @@ document.getElementById('explosionsDecalNormal').addEventListener('input', e => 
 });
 document.getElementById('btn-reset-explosions').addEventListener('click', () => {
   resetDamageMask();
+  // resetDamageMask wipes all 4 channels, including the sediment B channel.
+  // Re-bake it if sediment is on so the talus mask survives a reset.
+  if (STATE.sediment.enabled) refreshSedimentMask();
   // Also clear any active crater decals so the reset is visually total.
   for (const d of activeDecals) d.alive = false;
   sharedUniforms.uDecalCount.value = 0;
@@ -5464,7 +5538,8 @@ function syncSlidersFromState() {
   sharedUniforms.uSedimentEnabled.value   = STATE.sediment.enabled ? 1.0 : 0.0;
   sharedUniforms.uSedimentStrength.value  = STATE.sediment.strength;
   sharedUniforms.uSedimentDebugTint.value = STATE.sediment.debugTint;
-  refreshSedimentMask();
+  if (STATE.sediment.enabled) refreshSedimentMask();
+  else                        clearSedimentChannel();
 }
 
 function saveConfigToFile() {
