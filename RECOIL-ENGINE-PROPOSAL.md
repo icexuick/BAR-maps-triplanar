@@ -92,32 +92,34 @@ Each non-base layer carries the following uniforms ([triplanar-terrain.html:1472
 | `gradEnabled` + 8 `gradStops` | Optional per-layer height-gradient tint |
 | `slopeGradEnabled` + 8 `slopeGradStops` | Optional per-layer slope-gradient tint |
 | `fixed` | Layer reads pre-deformation height/slope — see §5 |
-| `paintMask` (proposed) | Optional per-layer hand-painted mask texture, multiplied into the procedural mask — see §3.2 |
+| `paintMaskChannel` (proposed) | Which channel of the global paint-mask texture this layer reads (R/G/B/A), or `none` — see §3.2 |
 | `useDiffuseAlpha` (proposed, DNTS-style) | Reinterpret the layer normal map's alpha channel as a diffuse modulator — see §3.4 |
 
-### 3.2 Per-layer painted masks (proposed addition)
+### 3.2 Global paint mask (proposed addition)
 
 The slope/height/edge-noise mask system covers the *procedural* case very well, but there are always cases where map authors want explicit hand control: "no grass in this exact area", "concrete platform here", "the path through the canyon should be sand even though the slope band would normally pick up cliff". The prototype does not implement this yet, but the natural extension is:
 
-- Each layer optionally references a single-channel mask texture (`paintMask`) authored by the mapper.
+- **One** RGBA paint-mask texture per map, sampled **once** per pixel by the terrain shader. Each channel maps to one auto-layer, addressed by the layer's `paintMaskChannel = "r" | "g" | "b" | "a"` field. So a single texture covers up to 4 layers; an 8-layer map needs a second texture.
 - Sampled in the heightmap's UV space (top-down planar — same projection as Recoil's existing splat distribution texture, so authoring is identical to today's BAR splatmap workflow).
-- Multiplied into the procedural mask after edge-noise, before final `strength` scaling. So `finalMask = procMask * paintMask * strength`.
-- A leading `paintMaskMode` flag controls whether the texture **multiplies** (default — the texture can only *subtract* coverage from the procedural mask) or **adds** (the texture can also *add* coverage outside the slope/height band).
+- Multiplied into each layer's procedural mask after edge-noise, before final `strength` scaling. So `finalMask = procMask * paintMaskChannel * strength`.
+- A per-layer `paintMaskMode` flag controls whether the channel **multiplies** (default — the painted value can only *subtract* coverage from the procedural mask) or **adds** (the painted value can also *add* coverage outside the slope/height band).
+- Layers with `paintMaskChannel = none` ignore the paint mask and run procedural-only.
 
-Cost: +1 tap per layer that uses the feature, but only when enabled — code-gen omits the sampler entirely when no `paintMask` is declared. Shared with the splat distribution channel layout, so existing mapping tooling (Photoshop, GIMP, dedicated splatmap editors) ports over directly.
+Cost: **+1 tap total**, regardless of how many layers reference the mask. The single texture fetch happens once at the top of the fragment shader and the four channels are reused across all layer evaluations. Code-gen omits the sampler entirely when no layer declares a `paintMaskChannel`.
 
-This combines the best of both worlds: procedural for "make it look natural everywhere" and painted for "but exactly this area must be different".
+This combines the best of both worlds: procedural for "make it look natural everywhere" and painted for "but exactly this area must be different" — at constant cost.
 
-### 3.3 Per-layer color tint via "color layer" (proposed addition)
+### 3.3 Color layers (proposed addition)
 
 Beyond material swaps, mappers often want to *tint* areas without committing a whole new material — "this region of the swamp should look greener", "the burn scars from a historic battle area read warmer than the rest of the grass". A natural extension:
 
-- A new layer **type** alongside the material auto-layers: `colorLayer = { tint = {0.6, 0.8, 0.5}, strength = 0.6, mask = "swamp.png", … }`.
-- Carries the same slope/height/edge-noise band system as material layers, plus the `paintMask` from §3.2.
-- Instead of sampling new material textures, it just `mix()`es a color (or `multiply`s, switchable) into the already-composited albedo at its evaluation point in the layer stack.
-- **Zero texture taps** when the painted mask is omitted (uses the procedural band only). +1 tap when a painted mask is supplied.
+- A new layer **type** alongside the material auto-layers: `colorLayer = { tint = {0.6, 0.8, 0.5}, strength = 0.6, paintMaskChannel = "g", … }`.
+- Applied as a single pass over the composited albedo, **after** all material layers are evaluated — so a color layer re-tones whatever material happens to be underneath rather than competing for coverage. This matches how concept artists already think about terrain ("materials change the surface, color layers re-tone it").
+- Carries the same slope/height/edge-noise band system as material layers, plus a `paintMaskChannel` reading from the same global paint-mask texture as §3.2 (so the mask texture's channels are shared between material layers and color layers — author whichever uses each channel).
+- Instead of sampling new material textures, it just `mix()`es a color (or `multiply`s, switchable) into the composited albedo. Roughness/normal pass through untouched.
+- **Zero extra texture taps** — the global paint mask is already sampled once for §3.2.
 
-Color layers compose freely with material layers in the stack (e.g. paint a "moss tint" color layer over the grass material layer), so the authoring vocabulary becomes "materials change the surface, color layers re-tone it" — which matches how concept artists already think about terrain.
+Multiple color layers can be stacked (e.g. one for swamp tint, one for burn scars), each one paying only the cost of its procedural mask math. The single global mask sample covers all of them.
 
 ### 3.4 DNTS-style diffuse-in-alpha (carried over from Recoil)
 
@@ -370,21 +372,21 @@ Measured directly from the in-browser HUD on a representative scene (Colorado, 1
 
 The shadow PCF count is **wildly over-budget** for an engine context — it's a prototype artefact. Recoil's existing terrain shadow is a single hardware-PCF tap; that is the right target. The realistic terrain-shader cost the engine team should evaluate is therefore:
 
-| Configuration | Material | +Paint masks (4) | +Color layer (1, painted) | Shadow | Damage | Decals | **Total** | vs. Recoil today |
+| Configuration | Material | +Global paint mask (§3.2) | +Color layers (§3.3) | Shadow | Damage | Decals | **Total** | vs. Recoil today |
 |---|---|---|---|---|---|---|---|---|
 | **Recoil today (typical BAR map, audited)** | **7** | — | — | **2** | 0 | (separate pass) | **~10** | baseline |
 | Recoil today, ceiling (everything on) | up to 13 | — | — | 2 | 0 | (separate pass) | **~18** | 1.8× |
 | **Proposal: biplanar, 1 base + 4 layers (procedural only)** | **20** | 0 | 0 | **2** | **1** | **0..2** | **~25** | **2.5×** |
-| Proposal: same + per-layer painted masks (§3.2) | 20 | +4 | 0 | 2 | 1 | 0..2 | ~29 | 2.9× |
-| Proposal: same + 1 painted color layer (§3.3) | 20 | +4 | +1 | 2 | 1 | 0..2 | ~30 | 3.0× |
+| Proposal: same + global paint mask (any number of layers) | 20 | +1 | 0 | 2 | 1 | 0..2 | ~26 | 2.6× |
+| Proposal: same + paint mask + N color layers | 20 | +1 | 0 | 2 | 1 | 0..2 | ~26 | 2.6× |
 | Proposal: biplanar, 1 base + 2 layers (lean preset, procedural only) | 12 | 0 | 0 | 2 | 1 | 0..2 | ~17 | 1.7× |
 | Proposal: triplanar opt-in, 1 base + 4 layers (procedural only) | 30 | 0 | 0 | 2 | 1 | 0..2 | ~35 | 3.5× |
 
-So against the audited typical-BAR-map baseline of **10 taps/px**, the recommended biplanar + 4-layer config lands at **~25 taps/px (~2.5×)** procedural-only, **~30 taps/px (~3.0×)** with full painted mask + color layer authoring on. A leaner 2-layer preset stays close to Recoil's *ceiling* config today (~17 vs ~18). Triplanar is ~3.5× and should be reserved for high-end maps that explicitly opt in.
+So against the audited typical-BAR-map baseline of **10 taps/px**, the recommended biplanar + 4-layer config lands at **~25 taps/px (~2.5×)** procedural-only, or **~26 taps/px (~2.6×)** with the global paint-mask authoring path on — regardless of how many layers (and how many color layers) reference the mask. A leaner 2-layer preset stays close to Recoil's *ceiling* config today (~17 vs ~18). Triplanar is ~3.5× and should be reserved for high-end maps that explicitly opt in.
 
 **DNTS-style diffuse-in-alpha (§3.4) costs zero extra taps** — it reuses the alpha channel of the layer's existing normal-map sample. Carrying it forward into the per-layer system is a free quality win.
 
-Painted masks and color layers are pay-only-when-used: a map that ships zero painted masks pays nothing for the feature (code-gen omits the sampler entirely).
+The global paint mask and color layers are pay-once-when-used: a map that ships no `paintMaskChannel` references on any layer pays nothing for either feature (code-gen omits the sampler). When in use, the cost stays at +1 tap whether a single layer references the mask or all eight do.
 
 These numbers do *not* include the separate ground-decal pass (`GroundDecalsFragProg.glsl`), nor any GBuffer/lighting/post-process taps Recoil performs around terrain — those stay constant, but they push the absolute frame cost higher than the relative ratio suggests.
 
