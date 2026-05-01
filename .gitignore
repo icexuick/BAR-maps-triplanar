@@ -5,3 +5,9 @@
 # Local-only working state
 .cache/
 *.local.*
+
+# Source art for decals (TGAs from Substance/Photoshop). The runtime uses
+# the exported PNGs alongside them; the TGAs are kept locally for re-export
+# but are too large to commit casually. Add explicitly with `git add -f` or
+# move to git LFS if you want them tracked.
+textures/decals/*.tga
