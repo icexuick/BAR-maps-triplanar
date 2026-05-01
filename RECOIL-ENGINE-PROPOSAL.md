@@ -27,6 +27,7 @@ A feature proposal to evolve Recoil's terrain rendering from single-projection p
 | **7** | **Topographic contour overlay** | World-Y isolines with normal-tilted groove walls, slope/height-gated. Sun direction picks up groove shading. | Negligible |
 | **8** | Save/load + slider-driven prototyping workflow | Mappers tune sliders in a hot-reload editor instead of painting splatmaps. | N/A (tooling) |
 | **9** | Staged rollout in 7 phases | Stages 1+2+3 deliver the core visual win; everything after is incremental. | — |
+| **11** | **Industry techniques** (height-blend, stochastic, RVT cache, Tier-1 VRS, snow accumulation, micro-shadow, specular AA, …) | Survey of modern AAA terrain tricks evaluated for top-down RTS. RVT cache + Tier-1 VRS together can make the steady-state cost *cheaper* than Recoil today despite the richer shader. | See §11 |
 
 **Performance summary** (§10, audited from `SMFFragProg.glsl`):
 - Recoil today, typical BAR map: **~10 taps/px**
@@ -34,8 +35,9 @@ A feature proposal to evolve Recoil's terrain rendering from single-projection p
 - Proposal, same + paint mask + color layers: **~26 taps/px (2.6×)**
 - Triplanar opt-in: ~35 taps/px (3.5×)
 - Lean preset (1 base + 2 layers): ~17 taps/px — within Recoil's existing all-features-on ceiling
+- **With RVT cache + Tier-1 VRS (§11.1): ~3 taps/px steady-state** — cheaper than Recoil today
 
-The proposal is more expensive than what Recoil renders today; the justification is the visual win (no cliff stretching, post-deformation re-binding, real per-material parameters) and the authoring win (slider-driven instead of splatmap-painted), not perf-neutrality.
+The bare proposal is more expensive than what Recoil renders today; the justification is the visual win (no cliff stretching, post-deformation re-binding, real per-material parameters) and the authoring win (slider-driven instead of splatmap-painted), not perf-neutrality. **Adopting the RVT cache from §11.1 inverts that story** — the steady-state cost drops below today's baseline, with the higher per-pixel cost only kicking in for the brief re-bake after a blast (driven for free by the §4 damage mask invalidation).
 
 ---
 
@@ -339,7 +341,7 @@ Stages 1, 2, and 3 deliver the core visual win. Everything after is incremental 
 
 **This is the section where this proposal asks the most of the engine team.** The prototype's per-pixel texture-fetch budget is meaningfully higher than what Recoil currently spends on terrain, and any honest evaluation of this approach has to start there.
 
-### 11.1 What Recoil's terrain shader spends today
+### 10.1 What Recoil's terrain shader spends today
 
 Audited from `cont/base/springcontent/shaders/GLSL/SMFFragProg.glsl` (the only modern terrain fragment shader in the tree — no GL4 SMF variant exists; ground decals are a separate pass in `GroundDecalsFragProg.glsl`):
 
@@ -371,7 +373,7 @@ Notable observations from the audit:
 
 Caveat: these counts are static analysis of `texture*()` call sites in the shader source, not RenderDoc-measured. The driver may collapse adjacent fetches in some cases.
 
-### 11.2 Measured TAPS/PX in the prototype
+### 10.2 Measured TAPS/PX in the prototype
 
 Measured directly from the in-browser HUD on a representative scene (Colorado, 1 base + 4 auto-layers, biplanar):
 
@@ -408,7 +410,7 @@ The global paint mask and color layers are pay-once-when-used: a map that ships 
 
 These numbers do *not* include the separate ground-decal pass (`GroundDecalsFragProg.glsl`), nor any GBuffer/lighting/post-process taps Recoil performs around terrain — those stay constant, but they push the absolute frame cost higher than the relative ratio suggests.
 
-### 11.3 Where the cost actually lands
+### 10.3 Where the cost actually lands
 
 A few honest qualifications on those numbers:
 
@@ -417,7 +419,7 @@ A few honest qualifications on those numbers:
 - **Layer count is the dominant lever.** Each additional auto-layer adds 4 taps under biplanar (or 6 under triplanar). A "premium" map running 6 layers under triplanar is **40 material taps/pixel** — at that point we are firmly in "art directors must justify each layer" territory.
 - **Recoil's 5-tap splat path partially overlaps with this proposal.** A BAR map today already pays 5 taps for the splat detail-normals (4 channels + 1 distribution). The proposed system replaces that with explicit layer materials — so the *net* increase is closer to **+15 taps over a splat-enabled BAR map** (10 → 25), not +20 over the absolute floor.
 
-### 11.4 Mitigations worth considering
+### 10.4 Mitigations worth considering
 
 If this cost increase is unacceptable as-is, options to bring it down include (in rough order of effort vs. payoff):
 
@@ -430,7 +432,7 @@ LOD-based layer culling is **explicitly not on this list**: all declared layers 
 
 The prototype implements none of the mitigations above — they are concrete paths the engine team can take if (1)+(2) alone aren't enough headroom.
 
-### 11.5 Bottom line
+### 10.5 Bottom line
 
 **The proposed system is more expensive than what Recoil renders today, and there is no honest way to spin that.** Against the audited typical-BAR-map baseline of 10 taps/px, the recommended biplanar + 4-layer config lands at ~25 taps/px (2.5×). With mitigation (1) (lean preset) plus (2) (shared normal map), that drops to ~12 taps/px — within ~20% of Recoil's current cost — at the price of some authoring flexibility.
 
@@ -438,7 +440,61 @@ The justification has to come from the visual win (no cliff stretching, real per
 
 ---
 
-## 11. Open questions for the engine team
+## 11. Industry techniques considered (adopted, rejected, deferred)
+
+This section surveys terrain-rendering techniques from modern AAA engines and shader literature, evaluated specifically for a top-down RTS camera with mostly-flat terrain and slow camera motion. The guiding observation: BAR/Recoil players stare at flat ground for hours, so **visible texture tiling and seam quality** dominate visual perception — far more than near-camera detail features (parallax, displacement) that an FPS would prioritise.
+
+### 11.1 Recommended additions (worth adopting)
+
+| Technique | What | Why for RTS | Cost | Source |
+|---|---|---|---|---|
+| **Height-based blending** | Replace smoothstep layer transitions with `max(h1+w1, h2+w2)` — layer's own height channel decides who wins per-pixel. Crisp interlocking transitions instead of muddy gradients. | Top of the list — biggest quality-per-byte win. Solves the "blurry seam" problem at zero per-pixel sampler cost. Composes perfectly with the §3 layer system. | +1 channel per layer (BC4 height map), a couple of ALU. **No extra taps.** | [Frostbite SIGGRAPH 2007](https://media.contentapi.ea.com/content/dam/eacom/frostbite/files/chapter5-andersson-terrain-rendering-in-frostbite.pdf) |
+| **Stochastic / hex-tile texturing** | Sample 3 randomly rotated/offset copies of a texture and blend with histogram preservation (Heitz/Deliot) or Mikkelsen's contrast-ramp simplification. Kills visible repetition on dominant ground textures. | RTS players see tiling more than anyone — fixed camera, slow zoom, wide-open ground. The biggest visible upgrade for the typical BAR view. Apply only to the dominant near-camera layer; far layers stay linear. | 3× taps per layer it's enabled on. Mitigate by gating to 1-2 layers and using detail-only sampling, or by caching via RVT (below). | [Heitz/Deliot](https://eheitzresearch.wordpress.com/738-2/), [Mikkelsen hex-tile](https://godotshaders.com/shader/stochastic-hex-tiling-mikkelsens-adaptation/) |
+| **Runtime Virtual Texture (RVT) cache** | Bake the fully-composited terrain shading into a virtual texture, sample cheaply each frame. Re-tile only damaged/dirty regions. The damage mask from §4 already gives us the invalidation signal for free. | **Top performance recommendation if any one item is adopted.** Slow-moving RTS camera + heavy multi-layer shader + already-existing damage-mask invalidation = textbook RVT use case. Makes the high tap count from §10 almost irrelevant for steady-state frames. | Heavy initial bake on map load + per-blast sub-region re-bake. Near-free per-pixel after that. | [Far Cry 4 AVT (GDC 2014)](https://gdcvault.com/play/1021761/Adaptive-Virtual-Texture-Rendering-in), [Unreal RVT](https://dev.epicgames.com/documentation/en-us/unreal-engine/runtime-virtual-texturing-in-unreal-engine) |
+| **Tier-1 Variable Rate Shading (terrain only)** | Render terrain at 2×2 shading rate; units, props, decals at 1×1. The terrain shader is high-cost-low-frequency — the 2×2 quad rate is invisible from the RTS camera but cuts the work by 4×. Firaxis reported ~20% frame win in their RTS using exactly this split. | Free perf in the most expensive pass. Composes with everything else here. Requires Tier-1 VRS hardware (broadly available since 2019). | Negligible setup. | [Firaxis VRS case study](https://devblogs.microsoft.com/directx/variable-rate-shading-a-scalpel-in-a-world-of-sledgehammers/) |
+| **Snow/dust accumulation as a "fixed" top layer** | Slope + up-vector test (`saturate(dot(N, up) * snowAmt - heightFade)`) drives a top layer that accumulates on flat upward-facing surfaces. Already fits the §5 "fixed" layer concept — accumulation reads the original normal so blast craters don't auto-fill with snow. | Trivial to add given §3 + §5 are already specified. Big art payoff (winter maps, dust storms, ash). Map authors get it as a single layer declaration. | Negligible — math only on top of an existing layer slot. | [Snowdrop engine](https://en.wikipedia.org/wiki/Snowdrop_(game_engine)) |
+| **Multi-scale detail tiling + detail normal fade** | Sample each layer at 2 frequencies (macro + meso) and modulate; cheaply hides repetition without going full stochastic. Detail normal at high frequency fades out by mip/distance to kill near-camera flatness when the user zooms in. | Cheap alternative or complement to stochastic. The fade-by-mip part costs nothing and visibly helps the close-zoom case BAR has. | +1 cheap macro tap per layer (low-res), or just a fade — trivial. | [iq texture repetition](https://iquilezles.org/articles/texturerepetition/) |
+| **Specular AA (Toksvig / LEAN-style normal filtering)** | When mip-chaining many composited normals, specular aliases hard. Roughness-from-normal-variance (rough² += normal_variance) is the standard fix. | Becomes necessary once §3 layers stack normals from 4+ materials. Without it, distant terrain shimmers. | Negligible (roughness adjustment in the mip chain). | [bgolus blending in detail](https://blog.selfshadow.com/publications/blending-in-detail/) |
+| **Micro-shadow from layer height** | Cheap horizon-based contact shadow using each layer's own height channel (Oat/Steed style). Huge perceived contact detail at near-zero cost. | Free quality, obvious win once §3 layers carry height maps for height-blending anyway. | 1 ALU. | [bgolus blending in detail](https://blog.selfshadow.com/publications/blending-in-detail/) |
+| **Texture2DArray per material slot** | Bind one array texture per channel-role (one for albedos, one for normals, one for height/AO/rough packs) and index by paint-mask channel or layer ID. | Effectively required for >4 distinct layers without bind-slot explosion. Lets the §3.2 paint mask address layers by index instead of name. | Memory-equivalent to separate textures; **better** cache behaviour. | — |
+| **Squared triplanar weights (Primozic)** | One-line tweak: square and renormalize the triplanar/biplanar blend weights. Sharper transitions on cliffs. | One line of GLSL, visible improvement. | Free. | [primozic](https://cprimozic.net/notes/posts/a-small-change-to-improve-triplanar-mapping/) |
+
+### 11.2 Considered and rejected (for top-down RTS)
+
+| Technique | Why not |
+|---|---|
+| **Parallax Occlusion Mapping (POM)** | Designed for grazing-angle FPS surfaces. From the RTS camera the parallax is barely visible, but the cost (6+ taps per layer) is brutal. Skip. |
+| **Hardware tessellation / displacement** | Recoil already has a heightfield. Adding tessellated displacement explodes vertex cost and is rarely visible from RTS angles. UE5's Nanite-on-Landscape is mainly a streaming/LOD win, not a quality one. |
+| **Contact-hardening shadows (PCSS) for terrain** | High cost, RTS sun is usually high enough that the existing single-tap PCF is fine. Spend the budget on unit shadows instead. |
+| **Screen-space AO for terrain** | Terrain is mostly low-curvature; baking AO into the layer height/AO channel (BC4) and using it directly is cheaper *and* better. SSAO is better spent on units and props. |
+| **Per-pixel POM-based puddles** | A wetness mask + a flat puddle plane gives visually identical results from the RTS camera at a fraction of the cost. |
+| **Megatexture / unique virtual texture as the base** | Streaming complexity, painful map editor turnaround, lower texel density than RVT-cached procedural shading. The RVT cache from §11.1 is the right answer; full megatexture is not. |
+| **Stochastic on every layer at all distances** | Only the dominant near-camera layer needs it. Distant layers can stay linear; mip chain hides the seam past ~mip 3. |
+
+### 11.3 Deferred / would require architectural changes
+
+- **Visibility-buffer + compute-shaded terrain** ([Horizon Forbidden West](https://www.guerrilla-games.com/read/adventures-with-deferred-texturing-in-horizon-forbidden-west)). Decouples visibility from material evaluation; lets you do software VRS, overlap with shadow passes. The *concept* (visibility buffer + compute shading) is what enables AAA terrain to ship cheap stochastic + many layers. Not a 6-month change for Recoil — flagged here as the long-term architecture if terrain ever needs to scale further.
+- **Wetness / puddle layer** driven by a global mask. Simple to add (darken albedo, boost spec, flatten normal where wet > threshold) but requires an art pipeline decision about who authors the wetness mask. Worth a follow-up proposal once §3 ships.
+- **Footprint / trail mask** ([RDR2](https://en.wikipedia.org/wiki/Red_Dead_Redemption_2)). Units leave a trail in a damage-mask-style channel that erodes the §5 fixed-grass layer where they walk. Genuinely cool for an RTS but requires a unit-position write path into the terrain texture.
+
+### 11.4 Updated TL;DR for §11.1 adoptions
+
+If all eight §11.1 recommendations land alongside the core proposal, the per-pixel cost picture changes substantially:
+
+| Configuration | Total taps/px | Notes |
+|---|---|---|
+| Core proposal, biplanar + 4 layers + paint mask | ~26 | as in §10 |
+| + height-based blending + micro-shadow | ~26 | math only |
+| + stochastic on 1 dominant layer | ~34 | 8 extra taps for 3× sampling on that layer |
+| + RVT cache (steady-state, no damage) | **~3** | base sample + shadow + damage |
+| + RVT cache (during/after blast, dirty region only) | ~26-34 in dirty region, ~3 elsewhere | invalidation drives partial re-bake |
+| + Tier-1 VRS (2×2 on terrain) | **÷4 effective** | quad rate, invisible from RTS camera |
+
+The **RVT cache + Tier-1 VRS combination is the killer feature**. With both, steady-state terrain rendering is *cheaper* than Recoil's current pipeline despite the much richer shader, and the 25-tap per-pixel cost only kicks in for dirty regions during the brief re-bake after a blast. The damage mask from §4 provides the invalidation signal automatically.
+
+---
+
+## 12. Open questions for the engine team
 
 1. **Map format.** Extending `mapinfo.lua` is the obvious path. Is there appetite for the layer-stack schema described in §3, or should this go through a separate `mapinfo_terrain.lua` or `customparams.terrain.*`?
 2. **Damage-mask resolution.** 1024² is the prototype default. For BAR's largest maps (24×24, 32×32) this is too coarse — probably wants 2048² or a per-map scaling. Memory at 2048² × RG16F = 16 MB, very manageable.
@@ -447,13 +503,32 @@ The justification has to come from the visual win (no cliff stretching, real per
 
 ---
 
-## 12. References
+## 13. References
 
 - Prototype source: [triplanar-terrain.html](triplanar-terrain.html) (single file, no build step)
+- Recoil `SMFFragProg.glsl` (audited in §10.1): <https://github.com/beyond-all-reason/RecoilEngine/blob/master/cont/base/springcontent/shaders/GLSL/SMFFragProg.glsl>
+- Recoil `BasicMapDamage.cpp` (crater profile in §4.1): <https://github.com/beyond-all-reason/RecoilEngine/blob/master/rts/Map/BasicMapDamage.cpp>
+- Example saved configs (heightmap embedded): [colorado-test46.json](colorado-test46.json), [colorado-test48.json](colorado-test48.json)
+
+**Projection / blending (§2, §3):**
+
 - Inigo Quilez, Biplanar mapping: <https://iquilezles.org/articles/biplanar/>
 - Ben Golus, Normal mapping for a triplanar shader: <https://bgolus.medium.com/normal-mapping-for-a-triplanar-shader-10bf39dca05a>
-- Recoil `BasicMapDamage.cpp`: <https://github.com/beyond-all-reason/RecoilEngine/blob/master/rts/Map/BasicMapDamage.cpp>
-- Example saved configs (heightmap embedded): [colorado-test46.json](colorado-test46.json), [colorado-test48.json](colorado-test48.json)
+- Ben Golus, Blending in detail (normal compositing, micro-shadow): <https://blog.selfshadow.com/publications/blending-in-detail/>
+- Casey Primozic, Triplanar weight tweak: <https://cprimozic.net/notes/posts/a-small-change-to-improve-triplanar-mapping/>
+- Inigo Quilez, Texture repetition: <https://iquilezles.org/articles/texturerepetition/>
+
+**Industry techniques (§11):**
+
+- Andersson, Terrain Rendering in Frostbite (SIGGRAPH 2007) — height-blend, splatting: <https://media.contentapi.ea.com/content/dam/eacom/frostbite/files/chapter5-andersson-terrain-rendering-in-frostbite.pdf>
+- Kihl, Destruction in Frostbite (SIGGRAPH 2010) — sparse damage masks: <https://advances.realtimerendering.com/s2010/Kihl-Destruction%20in%20Frostbite(SIGGRAPH%202010%20Advanced%20RealTime%20Rendering%20Course).pdf>
+- Heitz & Deliot, Procedural Stochastic Texturing — kills tiling: <https://eheitzresearch.wordpress.com/738-2/>
+- Mikkelsen Hex-Tile (Godot port): <https://godotshaders.com/shader/stochastic-hex-tiling-mikkelsens-adaptation/>
+- Ka Chen, Adaptive Virtual Texture in Far Cry 4 (GDC 2014): <https://gdcvault.com/play/1021761/Adaptive-Virtual-Texture-Rendering-in>
+- Unreal Runtime Virtual Texturing docs: <https://dev.epicgames.com/documentation/en-us/unreal-engine/runtime-virtual-texturing-in-unreal-engine>
+- DirectX devblog, VRS / Firaxis case study: <https://devblogs.microsoft.com/directx/variable-rate-shading-a-scalpel-in-a-world-of-sledgehammers/>
+- Guerrilla, Adventures with Deferred Texturing (Horizon Forbidden West): <https://www.guerrilla-games.com/read/adventures-with-deferred-texturing-in-horizon-forbidden-west>
+- Reed Beta, Understanding BCn formats (texture packing): <https://www.reedbeta.com/blog/understanding-bcn-texture-compression-formats/>
 
 ---
 
