@@ -515,6 +515,22 @@ The **RVT cache + Tier-1 VRS combination is the killer feature**. With both, ste
 3. **Existing GL4 decal system.** The surface-aligned projection from §6 is intended to **sit alongside** Recoil's current GL4 decal pass, not replace it. The existing system stays as the authoritative path for ground decals; the in-shader oriented projection is purely an additional crater/impact decal type for cases where wrap-onto-cliff behaviour matters. No re-authoring of existing decal art required.
 4. **Shader compilation cost.** Stage 3 (layer code-gen) means a shader recompile on map load. Acceptable, but if the engine supports shader caches (SPIR-V or driver binary), this could be cached per-map.
 
+5. **Material texture resolution.** The prototype currently ships 1K (1024²) source textures and they are visibly under-resolved on close-zoom shots — even at the typical RTS camera height, individual texels become readable when a unit is selected and the camera dips. Recommendation for the engine port:
+
+   | Resolution | Per material (BC7 color + BC5 normal, with mips) | 6 materials, total VRAM | Per-pixel bandwidth in main render |
+   |---|---|---|---|
+   | 1K | ~1.7 MB | ~10 MB | baseline |
+   | **2K (recommended minimum)** | **~6.7 MB** | **~40 MB** | ≈ baseline (mip-driven) |
+   | 4K | ~27 MB | ~160 MB | ≈ baseline at typical RTS zoom; only mip-0 hits cost more on extreme close zoom |
+
+   Three things to note:
+
+   - **Bandwidth doesn't scale with resolution at the RTS camera distance.** The GPU mip pyramid automatically picks lower levels at distance, so 2K vs. 4K is identical in cost for any pixel that isn't mapped to mip-0. Only super-zoomed close shots actually pay more for 4K.
+   - **VRAM is the real cost driver.** ~160 MB for 4K × 6 materials is fine on a 6 GB+ GPU but eats into the budget for everything else. ~40 MB for 2K is essentially free.
+   - **Disk size scales linearly with mip-0 area.** A 4K material set adds ~30-40 MB of map download per material vs. 2K. For a free game with first-time-download sensitivity this is a real cost.
+
+   Verdict from prototype play-testing: **2K is the sweet spot** for BAR. 4K is worth offering as an opt-in for "premium" maps that ship with their own material library, not as a baseline. Texture resolution is **independent of the layer count and sampler cap discussions** in §10 — it's purely a VRAM and disk-size trade-off.
+
 ---
 
 ## 13. References
