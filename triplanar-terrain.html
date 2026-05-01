@@ -796,6 +796,41 @@
       <input type="range" id="sedimentDebugTint" min="0" max="1" step="0.01" value="1">
     </div>
 
+    <div class="group-title" title="Global painted color layer (stand-in for the §3.3 color layer concept from the proposal). RGBA texture in heightmap UV space, painted with a CPU brush. Toggle PAINT MODE in the HUD to switch left-click from explosions to paint (right-click erases). The brush radius shows as a yellow ring on the terrain. Composite happens after all material layers + scorch + sediment, before lighting.">Paint Layer</div>
+    <div class="control-row" title="Composite the paint texture into the terrain albedo. Off = paint texture is ignored even if you've painted on it.">
+      <label>Enabled</label>
+      <input type="range" id="paintEnabled" min="0" max="1" step="1" value="1">
+    </div>
+    <div class="control-row" title="Global multiplier on the paint composite. 0 = paint invisible, 1 = full painted color shows through where alpha > 0.">
+      <label>Strength</label>
+      <input type="range" id="paintStrength" min="0" max="1" step="0.01" value="1">
+    </div>
+    <div class="control-row" title="Brush color. Left-click on the terrain (with PAINT MODE on) paints this color; right-click erases.">
+      <label>Color</label>
+      <input type="color" id="paintColor" value="#ff7733" style="width: 120px; height: 18px; padding: 0; border: 1px solid rgba(100, 180, 255, 0.25); background: transparent; cursor: pointer;">
+    </div>
+    <div class="control-row" title="Brush radius in WORLD units. Mouse-wheel scroll while in paint mode also adjusts this.">
+      <label>Radius</label>
+      <input type="range" id="paintRadius" min="0.1" max="8" step="0.05" value="2">
+    </div>
+    <div class="control-row" title="0 = fully soft falloff (gradient from center to edge), 1 = hard-edged disk (no falloff at all).">
+      <label>Hardness</label>
+      <input type="range" id="paintHardness" min="0" max="1" step="0.01" value="0.5">
+    </div>
+    <div class="control-row" title="Per-stroke opacity. Lower values mean each click adds less color, so you can build up coverage gradually.">
+      <label>Opacity</label>
+      <input type="range" id="paintOpacity" min="0" max="1" step="0.01" value="0.8">
+    </div>
+    <div style="margin-top: 4px;">
+      <button id="btn-paint-clear" style="
+        font-family: 'JetBrains Mono', monospace; font-size: 10px;
+        background: rgba(100, 180, 255, 0.08);
+        border: 1px solid rgba(100, 180, 255, 0.2);
+        color: rgba(160, 200, 240, 0.8);
+        padding: 4px 8px; border-radius: 3px; cursor: pointer;
+        width: 100%;">CLEAR PAINT</button>
+    </div>
+
     <div class="group-title">Water</div>
     <div class="control-row">
       <label>Enabled</label>
@@ -879,10 +914,10 @@
       <label>Decal tint</label>
       <input type="range" id="explosionsDecalTint" min="0" max="1" step="0.01" value="0.65">
     </div>
-    <div class="control-row">
-      <label>Decal normal</label>
-      <input type="range" id="explosionsDecalNormal" min="0" max="2" step="0.01" value="0.6">
-    </div>
+    <!-- Decal normal slider removed — the uDecalNormal sampler was dropped
+         to free a unit for the Paint texture (WebGL1 16-sampler cap).
+         Decals still composite albedo + glow; only the per-pixel normal
+         perturbation inside crater decals is gone. -->
     <div class="preset-btns">
       <button class="preset-btn" id="btn-reset-explosions">Reset Terrain</button>
     </div>
@@ -940,6 +975,15 @@
         color: rgba(160, 200, 240, 0.8);
         padding: 4px 8px; border-radius: 3px; cursor: pointer;
         width: 100%;">SHARPEN BLEND: OFF</button>
+    </div>
+    <div style="margin-top: 4px;">
+      <button id="btn-paint-mode" title="Paint mode: left-click on the terrain paints the brush color into the global paint texture, right-click erases. Mouse wheel adjusts brush radius. While ON, explosions are suppressed (left-click no longer detonates). Tune brush color/radius/hardness/opacity in the Paint Layer panel." style="
+        font-family: 'JetBrains Mono', monospace; font-size: 10px;
+        background: rgba(100, 180, 255, 0.08);
+        border: 1px solid rgba(100, 180, 255, 0.2);
+        color: rgba(160, 200, 240, 0.8);
+        padding: 4px 8px; border-radius: 3px; cursor: pointer;
+        width: 100%;">PAINT MODE: OFF</button>
     </div>
     <div class="preset-btns" style="margin-top: 8px;">
       <button class="preset-btn" id="btn-save-config">Save Config</button>
@@ -1057,6 +1101,15 @@ const STATE = {
     strength: 1.0,        // master multiplier on the output mask
     slopeFade: 1.0,       // 0 = ignore my own slope, 1 = sediment only on flat ground
     debugTint: 1.0,       // 0 = no visualisation, 1 = full red tint where sediment is — debug only, drives a sediment-coloured overlay so you can see where the mask fires
+  },
+  paint: {                // global painted color layer (RGBA texture in heightmap UV space). Stand-in for the §3.3 color layer concept from the proposal.
+    enabled: true,        // composite the paint texture into the terrain albedo
+    paintMode: false,     // when true, left-click paints / right-click erases instead of triggering explosions
+    color: '#ff7733',     // current brush color
+    radius: 2.0,          // brush radius in WORLD units
+    hardness: 0.5,        // 0 = fully soft falloff, 1 = hard-edged disk
+    opacity: 0.8,         // per-stroke opacity (multiplies into the painted alpha)
+    strength: 1.0,        // global multiplier on the composite — slider for "show less / more of the paint layer"
   },
   worldSize: 18,          // max dimension of terrain in scene units
   heightmapAspect: 1.0,   // width / height of loaded heightmap
@@ -1591,6 +1644,9 @@ function buildFragmentShader(state) {
   uniform float uHeightBlend;       // global Frostbite-style height-blend strength (0 = pure smoothstep masks, 1 = fully luma-driven)
   uniform float uSedimentStrength;  // multiplier on the sediment mask (B channel of uDamageMask)
   uniform float uSedimentDebugTint; // 0..1 visualisation overlay strength
+  uniform sampler2D uPaintTex;      // global painted color layer (RGBA, heightmap UV space)
+  uniform float     uPaintEnabled;
+  uniform float     uPaintStrength;
   uniform vec3  uSunDir;
   uniform vec3  uFogColor;
   uniform float uFogDensity;
@@ -1633,8 +1689,12 @@ function buildFragmentShader(state) {
 
   // Crater decals — up to MAX_DECALS oriented quads composited on top of
   // the terrain albedo. Channel layout matches BAR's GL4 decal system:
-  //   uDecalAlbedo: RGB albedo (×2× tint), A = decal opacity mask
-  //   uDecalNormal: RGB tangent-space normal (unused here for now), A = glow mask
+  //   uDecalAlbedo: RGB albedo (×2× tint), A = decal opacity mask + glow mask
+  // NOTE: previously had a separate uDecalNormal sampler for tangent-space
+  // normal perturbation + a dedicated glow channel. That sampler was
+  // dropped to free up a unit for the global Paint texture (we're already
+  // up against WebGL1's 16-sampler cap with a 5-material stack). Glow now
+  // reuses uDecalAlbedo.a, scaled by the existing uDecalGlow slider.
   // Per-decal state packed into parallel arrays:
   //   uDecalParams[i].xy = world-XZ centre
   //   uDecalParams[i].z  = world-space radius (the decal occupies a
@@ -1643,7 +1703,6 @@ function buildFragmentShader(state) {
   //                        so repeats don't look identical)
   //   uDecalFade[i]      = fade multiplier (0..1, drops as the decal ages)
   uniform sampler2D uDecalAlbedo;
-  uniform sampler2D uDecalNormal;
   uniform float     uDecalEnabled;
   uniform int       uDecalCount;
   // Per-decal data, packed into parallel arrays. Each decal is an
@@ -1663,7 +1722,8 @@ function buildFragmentShader(state) {
   uniform vec2      uDecalFade[${MAX_DECALS}];
   uniform float     uDecalGlow;        // master glow multiplier (slider)
   uniform float     uDecalTint;        // 0..1 — 0 leaves underlying ground unchanged, 1 = full BAR-style 2× tint
-  uniform float     uDecalNormalStr;   // 0..1+ — how much the decal _n RGB perturbs the terrain surface normal
+  // (uDecalNormalStr removed — normal perturbation dropped along with the
+  //  uDecalNormal sampler to free a unit for the Paint texture.)
 
   // Topographic contour lines
   uniform float uTopoEnabled;
@@ -2199,16 +2259,17 @@ ${scorchOn ? `
         vec2 nld = vec2(lu, lv);
         vec2 uv  = nld * 0.5 + 0.5;
         vec4 alb = texture2D(uDecalAlbedo, uv);
-        vec4 nrm = texture2D(uDecalNormal, uv);
 
         // Soft circular falloff inside the square so the decal blends
         // away at its edges instead of showing a sharp corner.
         float rd   = length(nld);
         float edge = 1.0 - smoothstep(0.85, 1.0, rd);
-        // No slope reject anymore — the oriented projection wraps the
-        // decal onto the actual surface. Slab fade keeps it confined to
-        // the impacted face so it doesn't bleed onto distant terrain.
-        float a = clamp(pow(alb.a, 0.55) * 1.4, 0.0, 1.0) * edge * fades.x * slabFade * normalAlign;
+        // The oriented projection wraps the decal onto the actual surface;
+        // slab fade keeps it confined to the impacted face so it doesn't
+        // bleed onto distant terrain.
+        float maskTerm = clamp(pow(alb.a, 0.55) * 1.4, 0.0, 1.0) * edge * slabFade * normalAlign;
+        float a        = maskTerm * fades.x;
+        float glowMask = maskTerm * fades.y;
 
         // Albedo: multiply (darken) the underlying ground, scaled by
         // the user's tint slider. tint=0 → unchanged, tint=1 → full
@@ -2216,21 +2277,11 @@ ${scorchOn ? `
         vec3 darken = mix(vec3(1.0), alb.rgb, uDecalTint);
         albedo = mix(albedo, albedo * darken, a);
 
-        // Glow: normal-map alpha is the emissive mask. Per-decal glow
-        // fade so each crater cools on its own timeline.
-        float glowMask = clamp(pow(alb.a, 0.55) * 1.4, 0.0, 1.0) * edge * fades.y * slabFade * normalAlign;
-        glowAcc += vec3(1.0, 0.45, 0.12) * nrm.a * glowMask * uDecalGlow;
-
-        // Normal-map perturbation. The decal's tangent-space normal
-        // unpacks to (tn.x, tn.y, tn.z); we transform it into world
-        // space using the decal's tangent frame: x → T, y → B, z → N.
-        // N is reconstructed via cross(T, B) since it's not stored.
-        if (uDecalNormalStr > 0.001) {
-          vec3 tn = nrm.rgb * 2.0 - 1.0;
-          vec3 N  = cross(T, B);
-          vec3 worldDecalN = normalize(tn.x * T + tn.y * B + max(tn.z, 0.0) * N);
-          normalAcc = normalize(mix(normalAcc, worldDecalN, a * uDecalNormalStr));
-        }
+        // Glow: drives the hot-orange emissive flash inside fresh craters.
+        // Previously read from a dedicated normal-map alpha channel; that
+        // sampler was dropped to make room for the Paint texture, so glow
+        // now reuses the albedo alpha as its mask, scaled by uDecalGlow.
+        glowAcc += vec3(1.0, 0.45, 0.12) * glowMask * uDecalGlow;
       }
     }
 
@@ -2246,6 +2297,25 @@ ${scorchOn ? `
       vec3 sedColor = vec3(0.78, 0.62, 0.42);
       float tintAmt = sedMask * uSedimentDebugTint;
       albedo = mix(albedo, albedo * 0.7 + sedColor * 0.55, tintAmt);
+    }
+
+    // ── Painted color layer (§3.3 stand-in) ──
+    // Sample a global RGBA paint texture in heightmap UV space and blend
+    // its color over whatever was composited so far. The paint texture's
+    // alpha drives the blend factor (per-pixel opacity from the brush);
+    // uPaintStrength is a global "show less / more" slider so the user
+    // can dial back the entire layer without re-painting. Toolchain-side
+    // the brush writes RGBA with the chosen color and per-stroke opacity.
+    if (uPaintEnabled > 0.5) {
+      vec2 paintUV = vec2(
+         vWorldPos.x / uWorldWidth + 0.5,
+        -vWorldPos.z / uWorldDepth + 0.5
+      );
+      if (paintUV.x >= 0.0 && paintUV.x <= 1.0 && paintUV.y >= 0.0 && paintUV.y <= 1.0) {
+        vec4 paint = texture2D(uPaintTex, paintUV);
+        float pAmt = paint.a * uPaintStrength;
+        albedo = mix(albedo, paint.rgb, pAmt);
+      }
     }
 
     vec3 normal = normalize(normalAcc);
@@ -2515,11 +2585,10 @@ for (const m of Object.values(MATERIAL_LIBRARY)) {
 //   _n: RGB tangent normal (currently unused — could perturb the surface
 //       normal in a future revision), A = glow / emission mask
 const decalAlbedoTex = getTexture('textures/decals/T_GroundCrack_09_a.png', { srgb: true });
-const decalNormalTex = getTexture('textures/decals/T_GroundCrack_09_n.png');
 // Override the default repeat wrap — decals are projected, not tiled,
 // so sampling outside [0..1] should return transparent edge texels.
 decalAlbedoTex.wrapS = decalAlbedoTex.wrapT = THREE.ClampToEdgeWrapping;
-decalNormalTex.wrapS = decalNormalTex.wrapT = THREE.ClampToEdgeWrapping;
+// (decalNormalTex removed — see uDecalNormal note above)
 
 // ═══════════════════════════════════════════════════════════════════════
 //  SHARED UNIFORMS (not layer-specific)
@@ -2538,6 +2607,17 @@ const sharedUniforms = {
   uSedimentEnabled:   { value: 0.0 },
   uSedimentStrength:  { value: 1.0 },
   uSedimentDebugTint: { value: 1.0 },
+  // Global painted color layer. Mutually exclusive with the dropped uDecalNormal
+  // sampler — see notes near the decal block. RGBA8, 1024², standalone sampler.
+  // Initialised to a 1×1 fully-transparent texture so the binding is valid
+  // even before the user has painted anything.
+  uPaintTex: { value: (() => {
+    const t = new THREE.DataTexture(new Uint8Array([0,0,0,0]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+    t.needsUpdate = true;
+    return t;
+  })() },
+  uPaintEnabled:  { value: 1.0 },
+  uPaintStrength: { value: 1.0 },
   uDisplacement: { value: 2.8 },
   uSunDir: { value: new THREE.Vector3(0.6, 0.8, 0.3) },
   uFogColor: { value: new THREE.Vector3(0.55, 0.62, 0.75) },
@@ -2559,7 +2639,7 @@ const sharedUniforms = {
   // Length must match MAX_DECALS in the shader; pre-allocate so we don't
   // realloc on every frame.
   uDecalAlbedo:     { value: null },
-  uDecalNormal:     { value: null },
+  // (uDecalNormal sampler removed — see Paint texture for who got the slot)
   uDecalEnabled:    { value: 1.0 },
   uDecalCount:      { value: 0 },
   // .xyz = world-space hit position, .w = invRadius
@@ -2575,7 +2655,7 @@ const sharedUniforms = {
   uDecalFade:       { value: Array.from({ length: MAX_DECALS }, () => new THREE.Vector2()) },
   uDecalGlow:       { value: 0.6 },
   uDecalTint:       { value: 0.65 },
-  uDecalNormalStr:  { value: 0.6 },
+  // (uDecalNormalStr removed — normal perturbation dropped along with the sampler)
 
   // Shadow mapping — bound to DirectionalLight.shadow after scene setup.
   uShadowMap:        { value: null },
@@ -2623,7 +2703,6 @@ const sharedUniforms = {
 // Bind the decal textures into the shared uniform set now that both the
 // textures and the uniforms object exist.
 sharedUniforms.uDecalAlbedo.value = decalAlbedoTex;
-sharedUniforms.uDecalNormal.value = decalNormalTex;
 
 // ═══════════════════════════════════════════════════════════════════════
 //  GEOMETRY / MATERIAL REBUILD
@@ -3396,6 +3475,198 @@ function clearSedimentChannel() {
   }
   damageMaskTex.needsUpdate = true;
 }
+
+// ── Paint texture (global RGBA color layer painted by the brush tool) ────
+// 1024² RGBA8 = 4 MB. Standalone sampler, took the slot freed by dropping
+// uDecalNormal. Brush writes go through the same dirty-rect strategy as
+// the damage mask: stampPaint() updates a sub-rectangle of the data buffer
+// AND of the dirty bounds, then uploadPaintDirtyRect() pushes only that
+// region via gl.texSubImage2D. Avoids re-uploading the full 4 MB on every
+// brush stroke.
+const PAINT_W = 1024, PAINT_H = 1024;
+let paintMaskData = new Uint8Array(PAINT_W * PAINT_H * 4);  // all zeros = blank canvas
+let paintMaskTex = new THREE.DataTexture(
+  paintMaskData, PAINT_W, PAINT_H, THREE.RGBAFormat, THREE.UnsignedByteType
+);
+paintMaskTex.wrapS = paintMaskTex.wrapT = THREE.ClampToEdgeWrapping;
+paintMaskTex.minFilter = THREE.LinearFilter;
+paintMaskTex.magFilter = THREE.LinearFilter;
+paintMaskTex.generateMipmaps = false;
+// Match the heightmap UV convention so worldXZ → paintUV lines up.
+paintMaskTex.flipY = true;
+paintMaskTex.needsUpdate = true;
+sharedUniforms.uPaintTex.value = paintMaskTex;
+
+// Dirty-rect bounds for the paint texture, in pixel coords. -1 = clean.
+let paintDirty = { minX: -1, minY: -1, maxX: -1, maxY: -1 };
+function paintDirtyExpand(x0, y0, x1, y1) {
+  if (paintDirty.minX === -1) {
+    paintDirty.minX = x0; paintDirty.minY = y0;
+    paintDirty.maxX = x1; paintDirty.maxY = y1;
+  } else {
+    if (x0 < paintDirty.minX) paintDirty.minX = x0;
+    if (y0 < paintDirty.minY) paintDirty.minY = y0;
+    if (x1 > paintDirty.maxX) paintDirty.maxX = x1;
+    if (y1 > paintDirty.maxY) paintDirty.maxY = y1;
+  }
+}
+
+// Stamp a circular brush at world XZ (wx, wz) with the current STATE.paint
+// settings. erase=true wipes alpha (and color) to zero in the brush area.
+let _paintBrushBuf = null;  // reused scratch for sub-image upload
+function stampPaint(wx, wz, erase) {
+  const cfg = STATE.paint;
+  const worldW = STATE.worldSize;
+  const worldD = STATE.worldSize / STATE.heightmapAspect;
+  // Map world XZ → paint UV (matches the shader: uv.x = wx/worldW + 0.5,
+  // uv.y = -wz/worldD + 0.5).
+  const u = wx / worldW + 0.5;
+  const v = -wz / worldD + 0.5;
+  // To pixel coords. Note: paint texture has flipY=true, so the row
+  // ordering in paintMaskData is "row 0 = TOP of image" (matches DataTexture
+  // convention that flipY then re-orients on upload).
+  const cx = u * PAINT_W;
+  const cy = (1 - v) * PAINT_H;  // invert so we write into the buffer in image-Y space (top-down)
+  // Brush radius in pixels: convert world radius to UV, then to pixels.
+  const rxPx = (cfg.radius / worldW) * PAINT_W;
+  const ryPx = (cfg.radius / worldD) * PAINT_H;
+  if (rxPx < 0.5 || ryPx < 0.5) return;
+
+  const x0 = Math.max(0, Math.floor(cx - rxPx - 1));
+  const x1 = Math.min(PAINT_W - 1, Math.ceil(cx + rxPx + 1));
+  const y0 = Math.max(0, Math.floor(cy - ryPx - 1));
+  const y1 = Math.min(PAINT_H - 1, Math.ceil(cy + ryPx + 1));
+  if (x1 < x0 || y1 < y0) return;
+  paintDirtyExpand(x0, y0, x1, y1);
+
+  // Parse hex color → 0..255.
+  const hex = cfg.color.replace('#', '');
+  const cr = parseInt(hex.substr(0, 2), 16);
+  const cg = parseInt(hex.substr(2, 2), 16);
+  const cb = parseInt(hex.substr(4, 2), 16);
+  const opacity255 = cfg.opacity * 255;
+  // Hardness shapes the brush falloff: hardness=1 → step at d=1 (hard
+  // disk), hardness=0 → smooth gradient from center to edge.
+  const hardEdge = cfg.hardness;     // d threshold below which alpha = 1
+  const softEnd  = 1.0;              // d threshold beyond which alpha = 0
+
+  for (let y = y0; y <= y1; y++) {
+    const dy = (y - cy) / ryPx;
+    for (let x = x0; x <= x1; x++) {
+      const dx = (x - cx) / rxPx;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d > 1.0) continue;
+      // Brush envelope: 1 inside hardEdge, falls off smoothly to 0 at softEnd.
+      let mask;
+      if (d <= hardEdge) {
+        mask = 1.0;
+      } else {
+        const t = (d - hardEdge) / Math.max(softEnd - hardEdge, 1e-4);
+        mask = 1.0 - t * t * (3 - 2 * t);  // smoothstep falloff
+      }
+      const idx = (y * PAINT_W + x) * 4;
+      if (erase) {
+        // Subtract from alpha (and proportionally fade color toward 0 so
+        // a fully-erased pixel doesn't keep stale color data around).
+        const eraseAmt = mask * opacity255;
+        const newA = Math.max(0, paintMaskData[idx + 3] - eraseAmt);
+        const ratio = newA / 255;
+        paintMaskData[idx    ] = paintMaskData[idx    ] * ratio;
+        paintMaskData[idx + 1] = paintMaskData[idx + 1] * ratio;
+        paintMaskData[idx + 2] = paintMaskData[idx + 2] * ratio;
+        paintMaskData[idx + 3] = newA;
+      } else {
+        // Standard "paint over" using the mask × opacity as the per-pixel
+        // alpha contribution. Build up to full coverage with repeated strokes.
+        const stroke = mask * opacity255;
+        const dstA = paintMaskData[idx + 3];
+        const newA = Math.min(255, dstA + stroke * (1 - dstA / 255));
+        // Pre-multiplied-style blend on the color so the newly-deposited
+        // pixels read as the brush color, then re-encode without premul.
+        const newColR = (paintMaskData[idx    ] * dstA + cr * (newA - dstA)) / Math.max(newA, 1);
+        const newColG = (paintMaskData[idx + 1] * dstA + cg * (newA - dstA)) / Math.max(newA, 1);
+        const newColB = (paintMaskData[idx + 2] * dstA + cb * (newA - dstA)) / Math.max(newA, 1);
+        paintMaskData[idx    ] = newColR;
+        paintMaskData[idx + 1] = newColG;
+        paintMaskData[idx + 2] = newColB;
+        paintMaskData[idx + 3] = newA;
+      }
+    }
+  }
+}
+
+// Upload only the dirty sub-rect of the paint texture to the GPU. Same
+// strategy as uploadDamageMaskDirtyRect — avoids re-uploading the full
+// 4 MB texture every brush stroke.
+function uploadPaintDirtyRect() {
+  if (paintDirty.minX === -1) return;
+  const gl = renderer.getContext();
+  const props = renderer.properties.get(paintMaskTex);
+  const glTex = props && props.__webglTexture;
+  if (!glTex) {
+    paintMaskTex.needsUpdate = true;
+    paintDirty.minX = paintDirty.minY = paintDirty.maxX = paintDirty.maxY = -1;
+    return;
+  }
+  const x = paintDirty.minX;
+  const y = paintDirty.minY;
+  const w = paintDirty.maxX - x + 1;
+  const h = paintDirty.maxY - y + 1;
+  // Pack the sub-rect into a contiguous scratch buffer.
+  const need = w * h * 4;
+  if (!_paintBrushBuf || _paintBrushBuf.length < need) {
+    _paintBrushBuf = new Uint8Array(Math.max(need, 256 * 256 * 4));
+  }
+  for (let row = 0; row < h; row++) {
+    const srcStart = ((y + row) * PAINT_W + x) * 4;
+    const dstStart = row * w * 4;
+    _paintBrushBuf.set(paintMaskData.subarray(srcStart, srcStart + w * 4), dstStart);
+  }
+  // Park on a high texture unit to avoid disturbing Three's bind cache.
+  const PARKED_UNIT = 15;
+  gl.activeTexture(gl.TEXTURE0 + PARKED_UNIT);
+  const prevBound = gl.getParameter(gl.TEXTURE_BINDING_2D);
+  gl.bindTexture(gl.TEXTURE_2D, glTex);
+  // Account for the texture's flipY=true: when we wrote into paintMaskData
+  // we used image-Y (top-down), and DataTexture flipY would flip on a full
+  // upload. For a sub-image we have to flip manually because GL texSubImage
+  // doesn't respect THREE's flipY hint here.
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texSubImage2D(
+    gl.TEXTURE_2D, 0, x, PAINT_H - (y + h), w, h,
+    gl.RGBA, gl.UNSIGNED_BYTE, _paintBrushBuf
+  );
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.bindTexture(gl.TEXTURE_2D, prevBound);
+  paintDirty.minX = paintDirty.minY = paintDirty.maxX = paintDirty.maxY = -1;
+}
+
+function clearPaintTexture() {
+  paintMaskData.fill(0);
+  paintMaskTex.needsUpdate = true;
+  paintDirty.minX = paintDirty.minY = paintDirty.maxX = paintDirty.maxY = -1;
+}
+
+// Cursor preview ring shown on the terrain when PAINT MODE is on. Built as
+// a thin annulus mesh positioned at the hover hit. Hidden whenever paint
+// mode is off or the cursor is outside the terrain.
+const paintCursorMat = new THREE.MeshBasicMaterial({
+  color: 0xffe566, transparent: true, opacity: 0.85, side: THREE.DoubleSide,
+  depthTest: false, depthWrite: false
+});
+let paintCursorMesh = null;
+function rebuildPaintCursor() {
+  if (paintCursorMesh) { scene.remove(paintCursorMesh); paintCursorMesh.geometry.dispose(); }
+  // RingGeometry inner/outer radii. Thin band ≈ 5% of radius for crispness.
+  const r = STATE.paint.radius;
+  const geo = new THREE.RingGeometry(r * 0.96, r, 64);
+  paintCursorMesh = new THREE.Mesh(geo, paintCursorMat);
+  paintCursorMesh.rotation.x = -Math.PI / 2;
+  paintCursorMesh.renderOrder = 9999;  // draw on top of everything
+  paintCursorMesh.visible = false;
+  scene.add(paintCursorMesh);
+}
+rebuildPaintCursor();
 
 // Build a float DataTexture from a Float32Array of heights in [0,1].
 // WebGL1 + ANGLE refuses LuminanceFormat+FloatType on many GPUs ("Invalid
@@ -4789,7 +5060,18 @@ updateCamera();
 renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
 
 renderer.domElement.addEventListener('pointerdown', e => {
-  // RMB (2), MMB (1), or Shift+LMB → pan. LMB → orbit.
+  // PAINT MODE: LMB and RMB are the brush; MMB / Shift+LMB still pan;
+  // orbit is suppressed entirely so the brush gesture isn't fought by
+  // camera rotation.
+  if (STATE.paint.paintMode) {
+    if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+      dragMode = 'pan';
+      prevMouse = { x: e.clientX, y: e.clientY };
+      e.preventDefault();
+    }
+    return;
+  }
+  // Default mode: RMB (2), MMB (1), or Shift+LMB → pan. LMB → orbit.
   if (e.button === 2 || e.button === 1 || (e.button === 0 && e.shiftKey)) {
     dragMode = 'pan';
   } else if (e.button === 0) {
@@ -4822,6 +5104,21 @@ window.addEventListener('pointermove', e => {
   updateCamera();
 });
 renderer.domElement.addEventListener('wheel', e => {
+  // Paint mode: mouse wheel adjusts brush radius instead of zooming.
+  if (STATE.paint.paintMode) {
+    const slider = document.getElementById('paintRadius');
+    const min = parseFloat(slider.min), max = parseFloat(slider.max);
+    const step = parseFloat(slider.step);
+    // ~5% of range per notch, scaled by wheel direction.
+    const delta = -Math.sign(e.deltaY) * Math.max(step, (max - min) * 0.05);
+    const next = Math.max(min, Math.min(max, STATE.paint.radius + delta));
+    STATE.paint.radius = next;
+    slider.value = next;
+    if (slider._valSpan && slider._valFmt) slider._valSpan.textContent = slider._valFmt(next);
+    rebuildPaintCursor();
+    e.preventDefault();
+    return;
+  }
   orbitDist = Math.max(4, Math.min(60, orbitDist + e.deltaY * 0.02));
   updateCamera();
   e.preventDefault();
@@ -4873,6 +5170,33 @@ document.getElementById('sedimentSlopeFade').addEventListener('input', e => {
   STATE.sediment.slopeFade = parseFloat(e.target.value);
   if (STATE.sediment.enabled) refreshSedimentMask();
 });
+
+// ── Paint Layer sliders + buttons ──
+document.getElementById('paintEnabled').addEventListener('input', e => {
+  STATE.paint.enabled = parseFloat(e.target.value) > 0.5;
+  sharedUniforms.uPaintEnabled.value = STATE.paint.enabled ? 1.0 : 0.0;
+});
+document.getElementById('paintStrength').addEventListener('input', e => {
+  STATE.paint.strength = parseFloat(e.target.value);
+  sharedUniforms.uPaintStrength.value = STATE.paint.strength;
+});
+document.getElementById('paintColor').addEventListener('input', e => {
+  STATE.paint.color = e.target.value;
+});
+document.getElementById('paintRadius').addEventListener('input', e => {
+  STATE.paint.radius = parseFloat(e.target.value);
+  rebuildPaintCursor();
+});
+document.getElementById('paintHardness').addEventListener('input', e => {
+  STATE.paint.hardness = parseFloat(e.target.value);
+});
+document.getElementById('paintOpacity').addEventListener('input', e => {
+  STATE.paint.opacity = parseFloat(e.target.value);
+});
+document.getElementById('btn-paint-clear').addEventListener('click', () => {
+  clearPaintTexture();
+});
+
 document.getElementById('fogDensity').addEventListener('input', e => {
   sharedUniforms.uFogDensity.value = parseFloat(e.target.value);
 });
@@ -4998,10 +5322,7 @@ document.getElementById('explosionsDecalTint').addEventListener('input', e => {
   STATE.explosions.decalTint = parseFloat(e.target.value);
   sharedUniforms.uDecalTint.value = STATE.explosions.decalTint;
 });
-document.getElementById('explosionsDecalNormal').addEventListener('input', e => {
-  STATE.explosions.decalNormalStr = parseFloat(e.target.value);
-  sharedUniforms.uDecalNormalStr.value = STATE.explosions.decalNormalStr;
-});
+// (decal normal slider removed — see uDecalNormal note in the shader)
 document.getElementById('btn-reset-explosions').addEventListener('click', () => {
   resetDamageMask();
   // resetDamageMask wipes all 4 channels, including the sediment B channel.
@@ -5020,11 +5341,90 @@ const explosionPointer = new THREE.Vector2();
 const explosionRayOrigin = new THREE.Vector3();
 const explosionRayDir    = new THREE.Vector3();
 let explosionMouseDown = null;
+let paintActiveButton = -1;  // 0 = LMB stroke (paint), 2 = RMB stroke (erase). -1 = idle.
+let lastPaintHit = null;     // last world XZ painted, used to interpolate strokes between events
+
+// Cast the screen pointer onto the displaced terrain. Returns null if no hit.
+function raycastTerrainAt(clientX, clientY) {
+  if (!terrain) return null;
+  const rect = renderer.domElement.getBoundingClientRect();
+  explosionPointer.x =  ((clientX - rect.left) / rect.width)  * 2 - 1;
+  explosionPointer.y = -((clientY - rect.top)  / rect.height) * 2 + 1;
+  explosionRayOrigin.copy(camera.position);
+  explosionRayDir.set(explosionPointer.x, explosionPointer.y, 0.5)
+    .unproject(camera)
+    .sub(camera.position)
+    .normalize();
+  return raycastDisplacedTerrain(explosionRayOrigin, explosionRayDir);
+}
+
 renderer.domElement.addEventListener('pointerdown', e => {
+  if (STATE.paint.paintMode && (e.button === 0 || e.button === 2)) {
+    // Begin a paint stroke. e.button: 0 = paint, 2 = erase.
+    paintActiveButton = e.button;
+    const hit = raycastTerrainAt(e.clientX, e.clientY);
+    if (hit) {
+      stampPaint(hit.x, hit.z, e.button === 2);
+      lastPaintHit = { x: hit.x, z: hit.z };
+      uploadPaintDirtyRect();
+    }
+    e.preventDefault();
+    return;
+  }
   if (e.button !== 0) return;
   explosionMouseDown = { x: e.clientX, y: e.clientY };
 });
+
+renderer.domElement.addEventListener('pointermove', e => {
+  const needsHit = (STATE.paint.paintMode && paintCursorMesh) || paintActiveButton >= 0;
+  if (!needsHit) return;
+  const hit = raycastTerrainAt(e.clientX, e.clientY);
+
+  // Cursor preview ring follows the hover position.
+  if (STATE.paint.paintMode && paintCursorMesh) {
+    if (hit) {
+      paintCursorMesh.position.set(hit.x, hit.y + 0.02, hit.z);
+      paintCursorMesh.visible = true;
+    } else {
+      paintCursorMesh.visible = false;
+    }
+  }
+
+  // Active brush stroke: stamp + interpolate gaps between events.
+  if (paintActiveButton >= 0 && hit) {
+    const erase = paintActiveButton === 2;
+    if (lastPaintHit) {
+      const dx = hit.x - lastPaintHit.x;
+      const dz = hit.z - lastPaintHit.z;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      const stepSize = Math.max(STATE.paint.radius * 0.4, 0.05);
+      if (dist > stepSize) {
+        const steps = Math.min(Math.ceil(dist / stepSize), 32);
+        for (let i = 1; i <= steps; i++) {
+          const t = i / steps;
+          stampPaint(lastPaintHit.x + dx * t, lastPaintHit.z + dz * t, erase);
+        }
+      } else {
+        stampPaint(hit.x, hit.z, erase);
+      }
+    } else {
+      stampPaint(hit.x, hit.z, erase);
+    }
+    lastPaintHit = { x: hit.x, z: hit.z };
+    uploadPaintDirtyRect();
+  }
+});
+
+renderer.domElement.addEventListener('pointerleave', () => {
+  if (paintCursorMesh) paintCursorMesh.visible = false;
+});
+
 renderer.domElement.addEventListener('pointerup', e => {
+  if (paintActiveButton >= 0 && (e.button === paintActiveButton)) {
+    paintActiveButton = -1;
+    lastPaintHit = null;
+    return;
+  }
   if (e.button !== 0 || !explosionMouseDown) return;
   const dx = e.clientX - explosionMouseDown.x;
   const dy = e.clientY - explosionMouseDown.y;
@@ -5032,18 +5432,7 @@ renderer.domElement.addEventListener('pointerup', e => {
   if (dx * dx + dy * dy > 25) return;           // treat drags as orbit, not fire
   if (!STATE.explosions.enabled) return;
   if (!terrain) return;
-
-  // Build the world-space ray from the click position.
-  const rect = renderer.domElement.getBoundingClientRect();
-  explosionPointer.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
-  explosionPointer.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
-  explosionRayOrigin.copy(camera.position);
-  explosionRayDir.set(explosionPointer.x, explosionPointer.y, 0.5)
-    .unproject(camera)
-    .sub(camera.position)
-    .normalize();
-
-  const hit = raycastDisplacedTerrain(explosionRayOrigin, explosionRayDir);
+  const hit = raycastTerrainAt(e.clientX, e.clientY);
   if (!hit) return;
   paintExplosion(hit.x, hit.z, STATE.explosions.radius);
   spawnDebris(hit.x, hit.y, hit.z, STATE.explosions.radius);
@@ -5292,7 +5681,8 @@ function collectConfig() {
       layers: STATE.layers.map(l => ({ ...l })),
       biplanar: STATE.biplanar,
       sharpenBlend: STATE.sharpenBlend,
-      sediment: { ...STATE.sediment }
+      sediment: { ...STATE.sediment },
+      paint: { ...STATE.paint, paintMode: false }  // never persist the active paint-mode toggle
     },
     shader: {
       texScale: u.uTexScale.value,
@@ -5339,9 +5729,49 @@ function collectConfig() {
     // fully restore the scene without needing the original source files.
     assets: {
       heightmap: currentHeightmapDataURL,
-      skybox:    currentSkyboxDataURL
+      skybox:    currentSkyboxDataURL,
+      paint:     paintMaskToDataURL()
     }
   };
+}
+
+// Encode the current paint texture as a PNG data URL via a temporary canvas.
+// Returns null if the canvas is fully blank (no painted alpha) — saves space
+// in the JSON snapshot for configs that don't use paint at all.
+function paintMaskToDataURL() {
+  // Fast bail if the texture is fully transparent.
+  let anyAlpha = false;
+  for (let i = 3; i < paintMaskData.length; i += 4) {
+    if (paintMaskData[i] > 0) { anyAlpha = true; break; }
+  }
+  if (!anyAlpha) return null;
+  const c = document.createElement('canvas');
+  c.width = PAINT_W; c.height = PAINT_H;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(PAINT_W, PAINT_H);
+  // paintMaskData is image-Y (top-down). Canvas ImageData is also top-down.
+  // We can copy directly.
+  img.data.set(paintMaskData);
+  ctx.putImageData(img, 0, 0);
+  return c.toDataURL('image/png');
+}
+
+function loadPaintFromDataURL(url) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = PAINT_W; c.height = PAINT_H;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0, PAINT_W, PAINT_H);
+      const data = ctx.getImageData(0, 0, PAINT_W, PAINT_H).data;
+      paintMaskData.set(data);
+      paintMaskTex.needsUpdate = true;
+      resolve();
+    };
+    img.onerror = () => resolve();
+    img.src = url;
+  });
 }
 
 function applyConfig(cfg) {
@@ -5359,6 +5789,9 @@ function applyConfig(cfg) {
     if (typeof cfg.state.biplanar === 'boolean') STATE.biplanar = cfg.state.biplanar;
     if (typeof cfg.state.sharpenBlend === 'boolean') STATE.sharpenBlend = cfg.state.sharpenBlend;
     if (cfg.state.sediment) STATE.sediment = { ...STATE.sediment, ...cfg.state.sediment };
+    if (cfg.state.paint) {
+      STATE.paint = { ...STATE.paint, ...cfg.state.paint, paintMode: false };
+    }
   }
 
   // Shader group
@@ -5454,6 +5887,11 @@ function applyConfig(cfg) {
   if (cfg.assets && cfg.assets.skybox) {
     loadSkyboxFromURL(cfg.assets.skybox, { silent: true });
   }
+  // Paint texture: clear first, then optionally restore from data URL.
+  clearPaintTexture();
+  if (cfg.assets && cfg.assets.paint) {
+    loadPaintFromDataURL(cfg.assets.paint);
+  }
 }
 
 function syncSlidersFromState() {
@@ -5513,12 +5951,10 @@ function syncSlidersFromState() {
   set('explosionsDecalEnabled',   STATE.explosions.decalEnabled === false ? 0 : 1);
   set('explosionsDecalGlow',      STATE.explosions.decalGlow);
   set('explosionsDecalTint',      STATE.explosions.decalTint);
-  set('explosionsDecalNormal',    STATE.explosions.decalNormalStr);
-  // Decal toggle/tint/normal flow through live uniforms (no rebuild
-  // needed), so push them into the shader after a config load.
+  // (decalNormal slider removed; old configs may still carry the value
+  //  but we silently drop it.)
   sharedUniforms.uDecalEnabled.value   = STATE.explosions.decalEnabled === false ? 0.0 : 1.0;
   sharedUniforms.uDecalTint.value      = STATE.explosions.decalTint      ?? 0.65;
-  sharedUniforms.uDecalNormalStr.value = STATE.explosions.decalNormalStr ?? 0.6;
 
   // Sync the projection-mode toggle buttons (their text label is the only
   // visible state for these — they don't have a slider readout).
@@ -5540,6 +5976,20 @@ function syncSlidersFromState() {
   sharedUniforms.uSedimentDebugTint.value = STATE.sediment.debugTint;
   if (STATE.sediment.enabled) refreshSedimentMask();
   else                        clearSedimentChannel();
+
+  // Paint sliders + uniforms.
+  set('paintEnabled',  STATE.paint.enabled ? 1 : 0);
+  set('paintStrength', STATE.paint.strength);
+  set('paintRadius',   STATE.paint.radius);
+  set('paintHardness', STATE.paint.hardness);
+  set('paintOpacity',  STATE.paint.opacity);
+  const pColor = document.getElementById('paintColor');
+  if (pColor) pColor.value = STATE.paint.color;
+  sharedUniforms.uPaintEnabled.value  = STATE.paint.enabled ? 1.0 : 0.0;
+  sharedUniforms.uPaintStrength.value = STATE.paint.strength;
+  rebuildPaintCursor();
+  const pmBtn = document.getElementById('btn-paint-mode');
+  if (pmBtn) pmBtn.textContent = `PAINT MODE: ${STATE.paint.paintMode ? 'ON' : 'OFF'}`;
 }
 
 function saveConfigToFile() {
@@ -6106,6 +6556,15 @@ document.getElementById('btn-sharpen-blend').addEventListener('click', () => {
     `SHARPEN BLEND: ${STATE.sharpenBlend ? 'ON' : 'OFF'}`;
   rebuildMaterial();
 });
+
+document.getElementById('btn-paint-mode').addEventListener('click', () => {
+  STATE.paint.paintMode = !STATE.paint.paintMode;
+  document.getElementById('btn-paint-mode').textContent =
+    `PAINT MODE: ${STATE.paint.paintMode ? 'ON' : 'OFF'}`;
+  // Hide the cursor preview ring immediately when paint mode is turned off.
+  if (!STATE.paint.paintMode && paintCursorMesh) paintCursorMesh.visible = false;
+});
+
 renderLayerPanel();
 
 // ═══════════════════════════════════════════════════════════════════════
