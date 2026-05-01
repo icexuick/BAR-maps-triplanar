@@ -898,13 +898,13 @@
     <div id="stat-varyings">VARY/UNI: --</div>
     <div id="stat-pixels">PIXELS: --</div>
     <div style="margin-top: 8px;">
-      <button id="btn-biplanar" style="
+      <button id="btn-biplanar" title="Triplanar (3-axis) projection is more expensive but slightly cleaner near 45° corners. Biplanar (2-axis) is the recommended default — see RECOIL-ENGINE-PROPOSAL.md §2. Toggle ON to compare." style="
         font-family: 'JetBrains Mono', monospace; font-size: 10px;
         background: rgba(100, 180, 255, 0.08);
         border: 1px solid rgba(100, 180, 255, 0.2);
         color: rgba(160, 200, 240, 0.8);
         padding: 4px 8px; border-radius: 3px; cursor: pointer;
-        width: 100%;">BIPLANAR: OFF</button>
+        width: 100%;">TRIPLANAR: OFF</button>
     </div>
     <div style="margin-top: 4px;">
       <button id="btn-sharpen-blend" title="Squared blend weights (Primozic): one extra w*=w + renormalize after the standard pow(blendWeights, sharpness). Sharper triplanar/biplanar transitions on cliffs at zero tap cost." style="
@@ -1017,7 +1017,7 @@ const STATE = {
     { id: 4, material: 'snow',  hMin: 0.75, hMax: 1.00, sMin: 0.00, sMax: 0.35, soft: 0.10, strength: 1.0, brightness: 1.0, thickness: 0.0, shadowStrength: 0.0, shadowDist: 0.02, shadowBlur: 0.01, fixed: false}
   ],
   nextLayerId: 5,
-  biplanar: false,        // use biplanar projection instead of triplanar (2 taps per texture instead of 3)
+  biplanar: true,         // biplanar (top-2 axes) is the default — see RECOIL-ENGINE-PROPOSAL.md §2; toggle TRIPLANAR ON to fall back to the 3-axis variant for comparison
   sharpenBlend: false,    // Primozic squared-weights tweak: extra w*=w + renormalize after the standard pow, sharper transitions on cliffs at zero tap cost
   heightBlend: 0.0,       // global strength of luma-driven height blending (Frostbite-style) on layer mask boundaries — 0 = disabled (smoothstep only), 1 = full
   worldSize: 18,          // max dimension of terrain in scene units
@@ -5260,7 +5260,7 @@ function syncSlidersFromState() {
   // Sync the projection-mode toggle buttons (their text label is the only
   // visible state for these — they don't have a slider readout).
   const bpBtn = document.getElementById('btn-biplanar');
-  if (bpBtn) bpBtn.textContent = `BIPLANAR: ${STATE.biplanar ? 'ON' : 'OFF'}`;
+  if (bpBtn) bpBtn.textContent = `TRIPLANAR: ${STATE.biplanar ? 'OFF' : 'ON'}`;
   const sbBtn = document.getElementById('btn-sharpen-blend');
   if (sbBtn) sbBtn.textContent = `SHARPEN BLEND: ${STATE.sharpenBlend ? 'ON' : 'OFF'}`;
 }
@@ -5815,8 +5815,11 @@ document.getElementById('btn-add-layer').addEventListener('click', addAutoLayer)
 
 document.getElementById('btn-biplanar').addEventListener('click', () => {
   STATE.biplanar = !STATE.biplanar;
+  // The button reports the TRIPLANAR state (the non-default mode), so it
+  // reads as "TRIPLANAR: ON" when the user has opted out of the biplanar
+  // default. biplanar=true → triplanar OFF; biplanar=false → triplanar ON.
   document.getElementById('btn-biplanar').textContent =
-    `BIPLANAR: ${STATE.biplanar ? 'ON' : 'OFF'}`;
+    `TRIPLANAR: ${STATE.biplanar ? 'OFF' : 'ON'}`;
   rebuildMaterial();
 });
 
