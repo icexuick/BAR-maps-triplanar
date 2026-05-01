@@ -770,6 +770,32 @@
       <input type="range" id="topoHeightMax" min="-0.25" max="1.25" step="0.01" value="1">
     </div>
 
+    <div class="group-title" title="Talus / scree mask: a CPU-baked single-channel texture that fires where pixels sit at the foot of steep cliffs. Detected by sampling 8 neighbours in a ring around each heightmap pixel and counting how much higher they are than me. Re-baked when heightmap or any slider changes. Cost in main render: 1 texture tap. Use the debug tint slider to visualise the mask, then drive a sediment material layer or a paint mask channel from it.">Sediment</div>
+    <div class="control-row">
+      <label>Enabled</label>
+      <input type="range" id="sedimentEnabled" min="0" max="1" step="1" value="0">
+    </div>
+    <div class="control-row" title="Sample ring radius in heightmap pixels. Larger = sediment reaches further from the cliff base; too large smears the mask. Try 4-12 for a 512² heightmap.">
+      <label>Radius</label>
+      <input type="range" id="sedimentRadius" min="1" max="32" step="1" value="8">
+    </div>
+    <div class="control-row" title="Minimum height delta (in normalized [0,1] heightmap units) for a neighbour to count as 'above me'. Higher = only steep cliffs contribute, lower = gentle slopes also dump sediment.">
+      <label>Threshold</label>
+      <input type="range" id="sedimentThreshold" min="0" max="0.2" step="0.001" value="0.02">
+    </div>
+    <div class="control-row" title="Master multiplier on the output mask.">
+      <label>Strength</label>
+      <input type="range" id="sedimentStrength" min="0" max="2" step="0.01" value="1">
+    </div>
+    <div class="control-row" title="0 = sediment lands everywhere even on cliffs themselves, 1 = only on flat ground (sediment slides off vertical surfaces). Realistic talus is around 0.7-1.0.">
+      <label>Slope Fade</label>
+      <input type="range" id="sedimentSlopeFade" min="0" max="1" step="0.01" value="1">
+    </div>
+    <div class="control-row" title="Debug visualisation: tints the terrain red where the sediment mask fires. 0 = invisible (mask-only mode for production use), 1 = full debug tint.">
+      <label>Debug Tint</label>
+      <input type="range" id="sedimentDebugTint" min="0" max="1" step="0.01" value="1">
+    </div>
+
     <div class="group-title">Water</div>
     <div class="control-row">
       <label>Enabled</label>
@@ -1020,6 +1046,14 @@ const STATE = {
   biplanar: true,         // biplanar (top-2 axes) is the default — see RECOIL-ENGINE-PROPOSAL.md §2; toggle TRIPLANAR ON to fall back to the 3-axis variant for comparison
   sharpenBlend: false,    // Primozic squared-weights tweak: extra w*=w + renormalize after the standard pow, sharper transitions on cliffs at zero tap cost
   heightBlend: 0.0,       // global strength of luma-driven height blending (Frostbite-style) on layer mask boundaries — 0 = disabled (smoothstep only), 1 = full
+  sediment: {             // CPU-baked talus/scree mask: detects pixels at the foot of steep cliffs (high neighbours within sample radius) and outputs a [0,1] mask
+    enabled: false,
+    radius: 8,            // sample ring radius in heightmap pixels — larger = sediment reaches further from cliffs
+    threshold: 0.02,      // minimum height delta (in normalized [0,1] heightmap units) to count a neighbour as "above me"
+    strength: 1.0,        // master multiplier on the output mask
+    slopeFade: 1.0,       // 0 = ignore my own slope, 1 = sediment only on flat ground
+    debugTint: 1.0,       // 0 = no visualisation, 1 = full red tint where sediment is — debug only, drives a sediment-coloured overlay so you can see where the mask fires
+  },
   worldSize: 18,          // max dimension of terrain in scene units
   heightmapAspect: 1.0,   // width / height of loaded heightmap
   // Auto height normalization from heightmap CPU analysis.
@@ -1551,6 +1585,10 @@ function buildFragmentShader(state) {
   uniform float uTexScale;
   uniform float uBlendSharpness;
   uniform float uHeightBlend;       // global Frostbite-style height-blend strength (0 = pure smoothstep masks, 1 = fully luma-driven)
+  uniform sampler2D uSedimentTex;   // CPU-baked talus mask (R8). Sampled in heightmap UV space.
+  uniform float     uSedimentEnabled;
+  uniform float     uSedimentStrength;
+  uniform float     uSedimentDebugTint;
   uniform vec3  uSunDir;
   uniform vec3  uFogColor;
   uniform float uFogDensity;
@@ -2138,6 +2176,25 @@ ${scorchOn ? `
       }
     }
 
+    // ── Sediment / talus overlay (CPU-baked mask) ──
+    // 1 texture tap. The mask is non-zero at the foot of cliffs (where
+    // detached material has accumulated). Debug Tint controls a red
+    // overlay so you can see where the mask fires; in production use you
+    // would drive a sediment material layer or a paint-mask channel from
+    // this signal instead of the debug tint.
+    if (uSedimentEnabled > 0.5) {
+      vec2 sedUV = vec2(
+         vWorldPos.x / uWorldWidth + 0.5,
+        -vWorldPos.z / uWorldDepth + 0.5
+      );
+      float sedMask = texture2D(uSedimentTex, sedUV).r * uSedimentStrength;
+      sedMask = clamp(sedMask, 0.0, 1.0);
+      // Debug visualisation: warm sand/dust tint blended in by the mask.
+      vec3 sedColor = vec3(0.78, 0.62, 0.42);
+      float tintAmt = sedMask * uSedimentDebugTint;
+      albedo = mix(albedo, albedo * 0.7 + sedColor * 0.55, tintAmt);
+    }
+
     vec3 normal = normalize(normalAcc);
     float roughness = clamp(roughAcc, 0.04, 1.0);
 
@@ -2419,6 +2476,20 @@ const sharedUniforms = {
   uTexScale: { value: 2.5 },
   uBlendSharpness: { value: 2.0 },
   uHeightBlend: { value: 0.0 },
+  // Sediment mask (CPU-baked from the heightmap, 1 sampler in main render).
+  // uSedimentTex is replaced with a fresh DataTexture each time the user
+  // tweaks Radius / Threshold / Slope Fade — those rebake the mask. The
+  // Strength and Debug Tint sliders flow through pure uniforms (no rebake).
+  // Initialised to a 1×1 zero texture so the sampler binding is valid even
+  // before the first heightmap load (some drivers warn about null samplers).
+  uSedimentTex:       { value: (() => {
+    const t = new THREE.DataTexture(new Uint8Array([0]), 1, 1, THREE.LuminanceFormat, THREE.UnsignedByteType);
+    t.needsUpdate = true;
+    return t;
+  })() },
+  uSedimentEnabled:   { value: 0.0 },
+  uSedimentStrength:  { value: 1.0 },
+  uSedimentDebugTint: { value: 1.0 },
   uDisplacement: { value: 2.8 },
   uSunDir: { value: new THREE.Vector3(0.6, 0.8, 0.3) },
   uFogColor: { value: new THREE.Vector3(0.55, 0.62, 0.75) },
@@ -3178,6 +3249,91 @@ function analyzeHeightFloat32(heightInfo) {
   }
   if (!isFinite(min)) { min = 0; max = 1; }
   return { width: w, height: h, min, max };
+}
+
+// ── Sediment / talus mask (CPU bake from heightmap) ──────────────────────
+// For each heightmap pixel, sample 8 neighbours in a ring at the configured
+// radius. Sum the height excess of any neighbour that sits more than the
+// threshold above me — that's the "talus from above" signal. Multiply by
+// (1 - slope) to fade off cliffs themselves. Result is a [0,1] R8 texture
+// the fragment shader can sample with a single tap.
+//
+// Cost: O(W*H * 8 samples). For 512² that's ~2M ops, runs in well under
+// 5ms even in JS. Re-baked when heightmap loads OR when Radius / Threshold
+// / Slope Fade slider changes (the cheap-to-bake branch). Strength + Debug
+// Tint flow through pure uniforms with no rebake.
+let lastBakedHeightInfo = null;     // remembers the source so slider tweaks can rebake
+function bakeSedimentMask(heightInfo) {
+  const { width: w, height: h, data } = heightInfo;
+  const cfg = STATE.sediment;
+  const radius = Math.max(1, Math.round(cfg.radius));
+  const thr = Math.max(0, cfg.threshold);
+  const slopeFadeAmt = Math.max(0, Math.min(1, cfg.slopeFade));
+
+  // Pre-compute the 8 ring directions × radius once. (cos/sin per angle.)
+  const NUM_DIRS = 8;
+  const dx = new Int32Array(NUM_DIRS);
+  const dy = new Int32Array(NUM_DIRS);
+  for (let i = 0; i < NUM_DIRS; i++) {
+    const a = (i / NUM_DIRS) * Math.PI * 2.0;
+    dx[i] = Math.round(Math.cos(a) * radius);
+    dy[i] = Math.round(Math.sin(a) * radius);
+  }
+
+  const out = new Uint8Array(w * h);
+  let maxAccum = 0;
+  // Pass 1: accumulate raw talus signal.
+  const raw = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const me = data[y * w + x];
+      let accum = 0;
+      for (let i = 0; i < NUM_DIRS; i++) {
+        let nx = x + dx[i];
+        let ny = y + dy[i];
+        if (nx < 0) nx = 0; else if (nx >= w) nx = w - 1;
+        if (ny < 0) ny = 0; else if (ny >= h) ny = h - 1;
+        const nh = data[ny * w + nx];
+        const delta = nh - me - thr;
+        if (delta > 0) accum += delta;
+      }
+      // Slope of THIS pixel (central difference). Used to fade sediment off
+      // steep cliff faces — talus naturally slides off near-vertical rocks.
+      let slope = 0;
+      if (slopeFadeAmt > 0) {
+        const xL = Math.max(0, x - 1), xR = Math.min(w - 1, x + 1);
+        const yU = Math.max(0, y - 1), yD = Math.min(h - 1, y + 1);
+        const gx = data[y * w + xR] - data[y * w + xL];
+        const gy = data[yD * w + x] - data[yU * w + x];
+        slope = Math.sqrt(gx * gx + gy * gy);
+      }
+      const slopeMask = 1.0 - Math.min(1.0, slope * 30.0) * slopeFadeAmt;
+      const v = accum * slopeMask;
+      raw[y * w + x] = v;
+      if (v > maxAccum) maxAccum = v;
+    }
+  }
+  // Pass 2: normalize to [0..255] and write the R8 texture.
+  const norm = maxAccum > 1e-6 ? (255.0 / maxAccum) : 0.0;
+  for (let p = 0; p < w * h; p++) {
+    const v = raw[p] * norm;
+    out[p] = v > 255 ? 255 : (v < 0 ? 0 : v);
+  }
+  const tex = new THREE.DataTexture(out, w, h, THREE.LuminanceFormat, THREE.UnsignedByteType);
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = true;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function refreshSedimentMask() {
+  if (!lastBakedHeightInfo) return;
+  const prev = sharedUniforms.uSedimentTex.value;
+  const tex = bakeSedimentMask(lastBakedHeightInfo);
+  sharedUniforms.uSedimentTex.value = tex;
+  if (prev && prev.dispose) prev.dispose();
 }
 
 // Build a float DataTexture from a Float32Array of heights in [0,1].
@@ -4471,6 +4627,9 @@ function applyHeightFloat32(heightInfo) {
   // can sample the displaced surface CPU-side.
   info.data = heightInfo.data;
   lastHeightmapInfo = info;
+  // Also remember it for the sediment mask — same buffer, no copy.
+  lastBakedHeightInfo = heightInfo;
+  refreshSedimentMask();
   STATE.heightmapAspect = info.width / info.height;
 
   const tex = makeHeightDataTexture(heightInfo);
@@ -4614,6 +4773,34 @@ document.getElementById('blendSharp').addEventListener('input', e => {
 });
 document.getElementById('heightBlend').addEventListener('input', e => {
   sharedUniforms.uHeightBlend.value = parseFloat(e.target.value);
+});
+
+// ── Sediment mask sliders ──
+// Enabled / Strength / Debug Tint flow through pure uniforms (no rebake).
+// Radius / Threshold / Slope Fade rebake the CPU mask.
+document.getElementById('sedimentEnabled').addEventListener('input', e => {
+  STATE.sediment.enabled = parseFloat(e.target.value) > 0.5;
+  sharedUniforms.uSedimentEnabled.value = STATE.sediment.enabled ? 1.0 : 0.0;
+});
+document.getElementById('sedimentStrength').addEventListener('input', e => {
+  STATE.sediment.strength = parseFloat(e.target.value);
+  sharedUniforms.uSedimentStrength.value = STATE.sediment.strength;
+});
+document.getElementById('sedimentDebugTint').addEventListener('input', e => {
+  STATE.sediment.debugTint = parseFloat(e.target.value);
+  sharedUniforms.uSedimentDebugTint.value = STATE.sediment.debugTint;
+});
+document.getElementById('sedimentRadius').addEventListener('input', e => {
+  STATE.sediment.radius = parseFloat(e.target.value);
+  refreshSedimentMask();
+});
+document.getElementById('sedimentThreshold').addEventListener('input', e => {
+  STATE.sediment.threshold = parseFloat(e.target.value);
+  refreshSedimentMask();
+});
+document.getElementById('sedimentSlopeFade').addEventListener('input', e => {
+  STATE.sediment.slopeFade = parseFloat(e.target.value);
+  refreshSedimentMask();
 });
 document.getElementById('fogDensity').addEventListener('input', e => {
   sharedUniforms.uFogDensity.value = parseFloat(e.target.value);
@@ -5030,7 +5217,8 @@ function collectConfig() {
       baseLayer: { ...STATE.baseLayer },
       layers: STATE.layers.map(l => ({ ...l })),
       biplanar: STATE.biplanar,
-      sharpenBlend: STATE.sharpenBlend
+      sharpenBlend: STATE.sharpenBlend,
+      sediment: { ...STATE.sediment }
     },
     shader: {
       texScale: u.uTexScale.value,
@@ -5096,6 +5284,7 @@ function applyConfig(cfg) {
     if (Array.isArray(cfg.state.layers)) STATE.layers = cfg.state.layers.map(l => ({ ...l }));
     if (typeof cfg.state.biplanar === 'boolean') STATE.biplanar = cfg.state.biplanar;
     if (typeof cfg.state.sharpenBlend === 'boolean') STATE.sharpenBlend = cfg.state.sharpenBlend;
+    if (cfg.state.sediment) STATE.sediment = { ...STATE.sediment, ...cfg.state.sediment };
   }
 
   // Shader group
@@ -5263,6 +5452,19 @@ function syncSlidersFromState() {
   if (bpBtn) bpBtn.textContent = `TRIPLANAR: ${STATE.biplanar ? 'OFF' : 'ON'}`;
   const sbBtn = document.getElementById('btn-sharpen-blend');
   if (sbBtn) sbBtn.textContent = `SHARPEN BLEND: ${STATE.sharpenBlend ? 'ON' : 'OFF'}`;
+
+  // Sediment sliders + uniforms. Push the cheap uniforms first, then trigger
+  // a CPU rebake of the mask if the heightmap has been loaded.
+  set('sedimentEnabled',   STATE.sediment.enabled ? 1 : 0);
+  set('sedimentRadius',    STATE.sediment.radius);
+  set('sedimentThreshold', STATE.sediment.threshold);
+  set('sedimentStrength',  STATE.sediment.strength);
+  set('sedimentSlopeFade', STATE.sediment.slopeFade);
+  set('sedimentDebugTint', STATE.sediment.debugTint);
+  sharedUniforms.uSedimentEnabled.value   = STATE.sediment.enabled ? 1.0 : 0.0;
+  sharedUniforms.uSedimentStrength.value  = STATE.sediment.strength;
+  sharedUniforms.uSedimentDebugTint.value = STATE.sediment.debugTint;
+  refreshSedimentMask();
 }
 
 function saveConfigToFile() {
