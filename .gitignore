@@ -1,0 +1,7 @@
+# Temporary research artefacts (e.g. fetched copies of upstream Recoil shaders
+# pulled down by the agent for inspection during proposal authoring).
+.tmp_*
+
+# Local-only working state
+.cache/
+*.local.*
