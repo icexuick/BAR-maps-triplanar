@@ -8,6 +8,38 @@ Target: Recoil Engine map renderer & shader pipeline
 
 ---
 
+## TL;DR
+
+A feature proposal to evolve Recoil's terrain rendering from single-projection planar splatting to a biplanar, layer-driven material system with hand-painted overrides, color tinting, BAR-shaped crater deformation, and surface-aligned impact decals. Below is the full feature list, with cost vs. Recoil's current ~10 taps/px baseline.
+
+| § | Feature | What it gives | Cost |
+|---|---|---|---|
+| **2** | **Biplanar projection** (recommended core) | No more cliff-stretching. Top-2 axis sampling per pixel; triplanar (3 axes) is an opt-in quality mode. | Foundation; cost shows up in §3 |
+| **3** | **Layered material compositing** | Up to N materials per map (sand/grass/cliff/snow/...) defined by slope+height bands, soft edges, organic FBM edge-noise. Replaces hand-painted splatmaps. | +4 taps per layer (biplanar) |
+| **3.1** | Per-layer drop shadows + sun-facing highlight lips | Fake 3D ledge depth without geometry. | Free (math only) |
+| **3.1** | Per-layer height + slope gradient tints | Up to 8 color stops per axis per layer. | Free |
+| **3.2** | **Global paint mask** (RGBA, one texture) | One channel per layer; mappers can hand-override the procedural mask. Combines procedural ("looks natural everywhere") with painted ("but here exactly differently"). | +1 tap, *constant* — not per layer |
+| **3.3** | **Color layers** | Re-tint composited albedo without committing a new material. Stack freely with material layers. | +0 taps (reuses §3.2 sample) |
+| **3.4** | **DNTS-style diffuse-in-alpha** (carried from Recoil) | Free per-texel diffuse modulator from the normal map's alpha channel. Cracks/crevices darken naturally without a separate AO map. | +0 taps (alpha is in the same fetch) |
+| **4** | **Damage mask + Recoil crater profile** | GPU-side signed depth mask (same Sombrero formula as `BasicMapDamage.cpp`). Vertex shader subtracts. Eased animation, dirty-rect uploads (~70-600× bandwidth saving). | +1 tap |
+| **5** | **"Fixed" layers** | Layers flagged `fixed` read pre-deformation height/slope, so e.g. grass can be *eroded* by a crater but never *grow back* in a fresh crater floor. | Negligible (2 extra varyings) |
+| **6** | **Surface-aligned crater decals** | Oriented projection (impact normal, not world-up) wraps decals onto cliffs and overhangs. **Additive to** Recoil's existing GL4 decal pass — no re-authoring of existing art. | +0..2 taps per visible decal |
+| **7** | **Topographic contour overlay** | World-Y isolines with normal-tilted groove walls, slope/height-gated. Sun direction picks up groove shading. | Negligible |
+| **8** | Explosion VFX (debris, fireball, shockwave, **terrain flash light**) | Mostly art/particles; flash light is the one engine-side ask (1 dynamic light contribution to the terrain shader per active blast, capped). | 1 vec3+float uniform per blast |
+| **9** | Save/load + slider-driven prototyping workflow | Mappers tune sliders in a hot-reload editor instead of painting splatmaps. | N/A (tooling) |
+| **10** | Staged rollout in 7 phases | Stages 1+2+3 deliver the core visual win; everything after is incremental. | — |
+
+**Performance summary** (§11, audited from `SMFFragProg.glsl`):
+- Recoil today, typical BAR map: **~10 taps/px**
+- Proposal, biplanar + 1 base + 4 layers, procedural only: **~25 taps/px (2.5×)**
+- Proposal, same + paint mask + color layers: **~26 taps/px (2.6×)**
+- Triplanar opt-in: ~35 taps/px (3.5×)
+- Lean preset (1 base + 2 layers): ~17 taps/px — within Recoil's existing all-features-on ceiling
+
+The proposal is more expensive than what Recoil renders today; the justification is the visual win (no cliff stretching, post-deformation re-binding, real per-material parameters) and the authoring win (slider-driven instead of splatmap-painted), not perf-neutrality.
+
+---
+
 ## 1. Why this proposal
 
 The current Recoil terrain pipeline composites map textures via a single planar projection (the heightmap's UV space). On steep cliff faces and overhangs this stretches the texels along the vertical axis and creates the well-known "smeared rock face" look that BAR maps work hard to hide with painted-in cliff layers and clever heightmap authoring.
